@@ -11,13 +11,20 @@ import trimesh
 INPUT_DIR        = "inputs2"
 OUTPUT_DIR       = "artifacts2"
 DEPTH_MODEL      = "depth-anything/Depth-Anything-V2-Base-hf"
-Z_AMPLIFY        = 2.0          # lower during testing — exposes geometry bugs
+Z_AMPLIFY        = 2.5
 BACK_THICKNESS   = 1.0
-MAX_SIDE         = 700
+MAX_SIDE         = 400
 MIRROR_MODE      = True
-SMOOTH_ITERS     = 4
-MEDIAN_KSIZE     = 5            # median blur for spike removal
-MAX_GRAD         = 0.05         # max depth difference between adjacent pixels
+SMOOTH_ITERS     = 6
+DOWNSAMPLE_PASSES = 3
+DOWNSAMPLE_SIZE  = 128
+MASK_ERODE_PX    = 4
+
+# ── UV Protection Flags ──────────────────────────────────────
+UV_CLAMP         = True      # clamp UVs to [0,1] — prevents wrap artifacts
+UV_SAMPLER_CLAMP = True      # CLAMP_TO_EDGE sampler on texture
+UV_DEBUG         = True      # write UV layout image for inspection
+UV_BACK_SOLID    = True      # back faces get solid colour, not mirrored texture
 
 # ── Cleanup artifacts2/ ──────────────────────────────────────
 if os.path.isdir(OUTPUT_DIR):
@@ -55,7 +62,6 @@ files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
 IMAGE_PATH = files[0]
 base_name  = os.path.splitext(os.path.basename(IMAGE_PATH))[0]
 print(f"Using image: {IMAGE_PATH}")
-print(f"Base name  : {base_name}")
 
 # ── Load image ────────────────────────────────────────────────
 img_pil = Image.open(IMAGE_PATH)
@@ -76,7 +82,6 @@ mask = np.zeros((H, W), dtype=np.uint8)
 labels = []
 mask_source = "none"
 
-# Priority 1: alpha channel
 if has_alpha:
     alpha = np.array(img_pil.convert("RGBA"))[..., 3]
     if alpha.min() < 200 and alpha.max() > 50:
@@ -85,7 +90,6 @@ if has_alpha:
         labels.append("subject")
         print("Using embedded alpha channel as mask")
 
-# Priority 2: Sapiens
 if mask_source == "none":
     try:
         import torch
@@ -124,9 +128,7 @@ if mask_source == "none":
         print(f"Sapiens parts: {'+'.join(labels)}")
     except Exception as e:
         print(f"Sapiens unavailable ({type(e).__name__}: {e})")
-        print("→ Trying rembg fallback.")
 
-# Priority 3: rembg
 if mask_source == "none":
     try:
         from rembg import remove, new_session
@@ -139,7 +141,6 @@ if mask_source == "none":
     except Exception as e:
         print(f"rembg unavailable ({e})")
 
-# Priority 4: MediaPipe
 if mask_source == "none":
     try:
         import mediapipe as mp
@@ -176,25 +177,25 @@ print(f"Mask source: {mask_source}")
 
 # ── Mask cleanup ─────────────────────────────────────────────
 kernel = np.ones((5, 5), np.uint8)
-mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-mask = cv2.dilate(mask, kernel, iterations=1)
+mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=3)
+mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel, iterations=2)
 
 num_labels, lab_imgs, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
 if num_labels > 1:
     largest = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
     mask = ((lab_imgs == largest).astype(np.uint8)) * 255
 
-mask = cv2.GaussianBlur(mask, (5, 5), 0)
+mask = cv2.erode(mask, np.ones((3, 3), np.uint8), iterations=MASK_ERODE_PX)
+mask = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=MASK_ERODE_PX - 1)
+
+mask = cv2.GaussianBlur(mask, (7, 7), 0)
 mask = (mask > 127).astype(np.uint8) * 255
 
 ys, xs = np.where(mask > 0)
 if len(xs) == 0:
     raise RuntimeError("Mask is empty")
 x0, y0, x1, y1 = xs.min(), ys.min(), xs.max()+1, ys.max()+1
-
-print(f"Mask coverage: {100*mask.mean()/255:.1f}% of image")
-print(f"Subject bbox: ({x0},{y0}) → ({x1},{y1})")
-print(f"Mask coverage in bbox: {100*mask[y0:y1, x0:x1].mean()/255:.1f}%")
+print(f"Mask bbox: ({x0},{y0}) → ({x1},{y1})")
 
 cv2.imwrite(os.path.join(OUTPUT_DIR, f"mask_{base_name}.png"), mask)
 
@@ -224,24 +225,15 @@ if len(subject_vals) < 10:
 lo, hi = np.percentile(subject_vals, 2), np.percentile(subject_vals, 98)
 disp = np.clip((raw_crop - lo) / (hi - lo + 1e-8), 0, 1).astype(np.float32)
 
-# ── FIX 1: Median blur removes isolated peaks ────────────────
-disp_u8 = (disp * 255).astype(np.uint8)
-disp_u8 = cv2.medianBlur(disp_u8, MEDIAN_KSIZE)
-disp = disp_u8.astype(np.float32) / 255.0
+print(f"Applying {DOWNSAMPLE_PASSES}× downsample-upsample...")
+ch, cw = disp.shape
+for i in range(DOWNSAMPLE_PASSES):
+    small = cv2.resize(disp, (DOWNSAMPLE_SIZE, DOWNSAMPLE_SIZE),
+                       interpolation=cv2.INTER_AREA)
+    disp = cv2.resize(small, (cw, ch), interpolation=cv2.INTER_CUBIC)
+    disp = cv2.GaussianBlur(disp, (3, 3), 0)
 
-# ── FIX 2: Gradient clip — no adjacent pixels jump in depth ──
-for _ in range(2):
-    dr = np.zeros_like(disp); dr[:, :-1] = disp[:, 1:] - disp[:, :-1]
-    dd = np.zeros_like(disp); dd[:-1, :] = disp[1:, :] - disp[:-1, :]
-    dr = np.clip(dr, -MAX_GRAD, MAX_GRAD)
-    dd = np.clip(dd, -MAX_GRAD, MAX_GRAD)
-    disp[:, :-1] += 0.5 * dr[:, :-1]
-    disp[1:, :]  += 0.5 * dd[:-1, :]
-    disp = np.clip(disp, 0, 1)
-
-# ── FIX 3: Gentle bilateral (keeps edges, smooths flats) ─────
-disp = cv2.bilateralFilter(disp, d=7, sigmaColor=0.08, sigmaSpace=10)
-
+disp = cv2.bilateralFilter(disp, d=9, sigmaColor=0.15, sigmaSpace=15)
 print(f"Depth range: {disp.min():.3f} → {disp.max():.3f}, std={disp.std():.3f}")
 
 # ── Stage 3: Build mesh ──────────────────────────────────────
@@ -263,7 +255,14 @@ us, vs = np.meshgrid(np.arange(w), np.arange(h))
 X = (us - w / 2) / max(w, h)
 Y = (vs - h / 2) / max(w, h)
 
-uv = np.stack([us.ravel() / (w - 1), 1.0 - vs.ravel() / (h - 1)], axis=-1)
+# ── UV PROTECTION Step 1: Compute UVs with clamp ─────────────
+uv_front = np.stack([us.ravel() / (w - 1), 1.0 - vs.ravel() / (h - 1)], axis=-1)
+
+if UV_CLAMP:
+    # Small epsilon inside [0,1] prevents edge bleeding
+    eps = 1.0 / max(w, h) / 4.0
+    uv_front = np.clip(uv_front, eps, 1.0 - eps)
+    print(f"UV clamped to [{eps:.4f}, {1-eps:.4f}]")
 
 # ── Mask-aware face build ────────────────────────────────────
 mask_bin = (mask_crop > 127).astype(np.uint8)
@@ -273,7 +272,7 @@ m_tl = mask_dil[:-1, :-1].astype(bool)
 m_tr = mask_dil[:-1, 1:].astype(bool)
 m_br = mask_dil[1:, 1:].astype(bool)
 m_bl = mask_dil[1:, :-1].astype(bool)
-valid_cells = m_tl & m_tr & m_br & m_bl  # shape (h-1, w-1)
+valid_cells = m_tl & m_tr & m_br & m_bl
 
 idx = np.arange(h * w).reshape(h, w)
 a = idx[:-1, :-1][valid_cells]
@@ -291,7 +290,7 @@ front_faces = np.vstack([
     np.stack([a, c, d], axis=1),
 ])
 
-# ── Back surface ─────────────────────────────────────────────
+# Back surface
 z_flat = z.ravel()
 z_mean = z_flat[mask_bin.ravel() > 0].mean()
 z_back = (z_flat + BACK_THICKNESS - 0.3 * (z_flat - z_mean)).reshape(h, w)
@@ -300,7 +299,16 @@ z_back = np.clip(z_back, z.min(), z.max() + BACK_THICKNESS + 0.5)
 front_verts = np.stack([X.ravel(), Y.ravel(), z.ravel()], axis=-1)
 back_verts  = np.stack([X.ravel(), Y.ravel(), z_back.ravel()], axis=-1)
 vertices = np.vstack([front_verts, back_verts])
-uv = np.vstack([uv, uv])
+
+# ── UV PROTECTION Step 2: Back UVs mapped to a solid corner ──
+if UV_BACK_SOLID:
+    # Back faces sample a uniform grey patch (top-left 1% of texture)
+    # This prevents the mirrored image from appearing on the back
+    solid_uv = np.full_like(uv_front, 0.005)
+    uv = np.vstack([uv_front, solid_uv])
+    print("Back UVs mapped to solid corner (no mirrored texture)")
+else:
+    uv = np.vstack([uv_front, uv_front])
 
 off = h * w
 back_faces = np.vstack([
@@ -308,56 +316,41 @@ back_faces = np.vstack([
     np.stack([a + off, d + off, c + off], axis=1),
 ])
 
-# ── FIX 4: Neighbour-based edge seam (no contour, no spikes) ─
-print("Building edge seam from grid neighbours...")
-
-# valid_cells has shape (h-1, w-1). Detect boundary cells.
+# ── Neighbour-based edge seam ────────────────────────────────
 V = valid_cells
-
 above_valid = np.zeros_like(V); above_valid[1:, :] = V[:-1, :]
 below_valid = np.zeros_like(V); below_valid[:-1, :] = V[1:, :]
 left_valid  = np.zeros_like(V); left_valid[:, 1:] = V[:, :-1]
 right_valid = np.zeros_like(V); right_valid[:, :-1] = V[:, 1:]
 
-top_boundary    = V & (~above_valid)
-bottom_boundary = V & (~below_valid)
-left_boundary   = V & (~left_valid)
-right_boundary  = V & (~right_valid)
-
-print(f"Boundary cells: top={top_boundary.sum()}, bottom={bottom_boundary.sum()}, "
-      f"left={left_boundary.sum()}, right={right_boundary.sum()}")
+top_b    = V & (~above_valid)
+bottom_b = V & (~below_valid)
+left_b   = V & (~left_valid)
+right_b  = V & (~right_valid)
 
 seam_faces_list = []
 
-# Top edges → connect (tl, tr) to (tl+off, tr+off)
-rows, cols = np.where(top_boundary)
+rows, cols = np.where(top_b)
 if len(rows):
-    tl = rows * w + cols
-    tr = tl + 1
+    tl = rows * w + cols; tr = tl + 1
     seam_faces_list.append(np.stack([tl, tr, tr + off], axis=1))
     seam_faces_list.append(np.stack([tl, tr + off, tl + off], axis=1))
 
-# Bottom edges → (bl, br)
-rows, cols = np.where(bottom_boundary)
+rows, cols = np.where(bottom_b)
 if len(rows):
-    bl = (rows + 1) * w + cols
-    br = bl + 1
+    bl = (rows + 1) * w + cols; br = bl + 1
     seam_faces_list.append(np.stack([bl, br, br + off], axis=1))
     seam_faces_list.append(np.stack([bl, br + off, bl + off], axis=1))
 
-# Left edges → (tl, bl)
-rows, cols = np.where(left_boundary)
+rows, cols = np.where(left_b)
 if len(rows):
-    tl = rows * w + cols
-    bl = tl + w
+    tl = rows * w + cols; bl = tl + w
     seam_faces_list.append(np.stack([tl, bl, bl + off], axis=1))
     seam_faces_list.append(np.stack([tl, bl + off, tl + off], axis=1))
 
-# Right edges → (tr, br)
-rows, cols = np.where(right_boundary)
+rows, cols = np.where(right_b)
 if len(rows):
-    tr = rows * w + (cols + 1)
-    br = tr + w
+    tr = rows * w + (cols + 1); br = tr + w
     seam_faces_list.append(np.stack([tr, br, br + off], axis=1))
     seam_faces_list.append(np.stack([tr, br + off, tr + off], axis=1))
 
@@ -367,31 +360,96 @@ if seam_faces_list:
 else:
     faces = np.vstack([front_faces, back_faces])
 
-print(f"Seam faces: {len(seam_faces) if seam_faces_list else 0}")
 print(f"Mesh: {len(vertices)} vertices, {len(faces)} faces")
 
-# ── Laplacian smoothing ──────────────────────────────────────
-print(f"\nApplying {SMOOTH_ITERS} Laplacian smoothing iterations...")
 mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+
+print(f"Applying {SMOOTH_ITERS} Laplacian iterations...")
 try:
     trimesh.smoothing.filter_laplacian(mesh, lamb=0.1, iterations=SMOOTH_ITERS)
     print("Laplacian smoothing applied")
 except Exception as e:
-    print(f"Laplacian smoothing skipped: {e}")
+    print(f"Laplacian skipped: {e}")
 
 mesh.remove_unreferenced_vertices()
 print(f"After cleanup: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
 
-# ── Stage 4: Export GLB ──────────────────────────────────────
-print("\n── STAGE 4: Export GLB ──")
+# ── Stage 4: Build texture with padding (UV safety) ──────────
+print("\n── STAGE 4: UV-protected texture ──")
 
-texture_img = Image.fromarray(rgb_crop)
+# Add a 2-pixel border of edge colour around the texture so that
+# any UV sample near [0,1] edges picks up real pixel data, not white
+BORDER = 2
+texture_padded = cv2.copyMakeBorder(
+    rgb_crop, BORDER, BORDER, BORDER, BORDER,
+    cv2.BORDER_REPLICATE
+)
+print(f"Texture padded to {texture_padded.shape[1]}×{texture_padded.shape[0]} "
+      f"(+{BORDER}px border)")
+
+# Remap UVs to account for the padding
+pad_w = texture_padded.shape[1]
+pad_h = texture_padded.shape[0]
+uv_pad = uv.copy()
+uv_pad[:, 0] = (uv[:, 0] * (pad_w - 2 * BORDER) + BORDER) / pad_w
+uv_pad[:, 1] = (uv[:, 1] * (pad_h - 2 * BORDER) + BORDER) / pad_h
+
+texture_img = Image.fromarray(texture_padded)
 visual = trimesh.visual.TextureVisuals(
-    uv=uv,
+    uv=uv_pad,
     image=texture_img,
     material=trimesh.visual.texture.SimpleMaterial(image=texture_img),
 )
+
+# ── UV PROTECTION Step 3: Set CLAMP_TO_EDGE sampler ──────────
+if UV_SAMPLER_CLAMP:
+    try:
+        # Trimesh's PBR material uses glTF sampler; set wrap modes to CLAMP
+        visual.material.kwargs["sampler"] = {
+            "magFilter": 9729,   # GL_LINEAR
+            "minFilter": 9987,   # GL_LINEAR_MIPMAP_LINEAR
+            "wrapS": 33071,      # GL_CLAMP_TO_EDGE
+            "wrapT": 33071,      # GL_CLAMP_TO_EDGE
+        }
+        print("Texture sampler set to CLAMP_TO_EDGE")
+    except Exception as e:
+        print(f"Sampler config skipped: {e}")
+
 mesh.visual = visual
+
+# ── UV PROTECTION Step 4: Write UV debug visualization ───────
+if UV_DEBUG:
+    print("\n── Generating UV debug visualisation ──")
+    debug = np.zeros((pad_h, pad_w, 3), dtype=np.uint8)
+    debug[:] = (40, 40, 40)
+
+    # Draw the sampled UV points as dots
+    px = np.clip((uv_pad[:, 0] * (pad_w - 1)).astype(int), 0, pad_w - 1)
+    py = np.clip(((1.0 - uv_pad[:, 1]) * (pad_h - 1)).astype(int), 0, pad_h - 1)
+
+    # Only draw front-facing vertices in bright cyan
+    n_front = len(uv_front)
+    for i in range(0, n_front, 20):    # sample every 20th for speed
+        cv2.circle(debug, (px[i], py[i]), 1, (255, 255, 0), -1)
+
+    # Mark back-face samples in orange
+    for i in range(n_front, len(px), 50):
+        cv2.circle(debug, (px[i], py[i]), 1, (0, 140, 255), -1)
+
+    # Draw border frame
+    cv2.rectangle(debug, (BORDER, BORDER),
+                  (pad_w - BORDER - 1, pad_h - BORDER - 1),
+                  (255, 255, 255), 1)
+
+    cv2.putText(debug, "FRONT CYAN / BACK ORANGE",
+                (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
+    uv_debug_path = os.path.join(OUTPUT_DIR, f"uv_debug_{base_name}.png")
+    cv2.imwrite(uv_debug_path, debug)
+    print(f"UV debug saved: {uv_debug_path}")
+
+# ── Stage 5: Export GLB ──────────────────────────────────────
+print("\n── STAGE 5: Export GLB ──")
 
 label_str = "+".join(labels)
 suffix = "closed" if MIRROR_MODE else "open"
