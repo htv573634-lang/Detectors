@@ -13,7 +13,6 @@ INPUT_DIR  = "inputs2"
 OUTPUT_DIR = "artifacts2"
 DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Small-hf"
 SMPL_ONNX   = "models/smpl.onnx"
-ROMP_ONNX   = "models/romp.onnx"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs("models", exist_ok=True)
@@ -37,7 +36,7 @@ if img_bgr is None:
                            cv2.COLOR_RGB2BGR)
 img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-# ── Stage 1: ROMP → pose params (no SMPL file needed) ────────
+# ── Stage 1: ROMP → pose params (with fallback) ──────────────
 print("\n── STAGE 1: ROMP body pose ──")
 
 import romp
@@ -45,23 +44,36 @@ settings = romp.main.default_settings
 settings.mode = "image"
 settings.show = False
 settings.onnx = True
-settings.calc_smpl = False          # ← KEY FIX: skip SMPL parser
+settings.calc_smpl = False          # skip SMPL parser — NoSMPL handles mesh
+settings.show_largest = True
+settings.center_thresh = 0.1
 
 romp_model = romp.ROMP(settings)
 outputs = romp_model(img_bgr)
 
+print(f"ROMP output type: {type(outputs)}")
+print(f"ROMP output value: {outputs}")
+
 if isinstance(outputs, dict):
     outputs = [outputs]
-person = max(outputs, key=lambda x: float(np.max(x.get("center_conf", [1]))))
 
-betas        = np.asarray(person["betas"]).reshape(1, -1).astype(np.float32)
-body_pose    = np.asarray(person["pose"]).reshape(1, -1, 3).astype(np.float32)
-global_orient = np.asarray(person.get("global_orient",
-                            np.zeros((1, 1, 3)))).reshape(1, 1, 3).astype(np.float32)
+if not outputs:
+    print("⚠️  No person detected by ROMP — using neutral template pose.")
+    betas         = np.zeros((1, 10), dtype=np.float32)
+    body_pose     = np.zeros((1, 23, 3), dtype=np.float32)
+    global_orient = np.zeros((1, 1, 3), dtype=np.float32)
+else:
+    person = max(outputs, key=lambda x: float(np.max(x.get("center_conf", [1]))))
+    print(f"Detection keys: {person.keys()}")
 
-if body_pose.shape[1] == 24:
-    global_orient = body_pose[:, :1, :]
-    body_pose     = body_pose[:, 1:, :]
+    betas         = np.asarray(person["betas"]).reshape(1, -1).astype(np.float32)
+    body_pose     = np.asarray(person["pose"]).reshape(1, -1, 3).astype(np.float32)
+    global_orient = np.asarray(person.get("global_orient",
+                               np.zeros((1, 1, 3)))).reshape(1, 1, 3).astype(np.float32)
+
+    if body_pose.shape[1] == 24:
+        global_orient = body_pose[:, :1, :]
+        body_pose     = body_pose[:, 1:, :]
 
 print(f"betas: {betas.shape}, body_pose: {body_pose.shape}, orient: {global_orient.shape}")
 
@@ -71,7 +83,7 @@ print("\n── STAGE 2: NoSMPL solid mesh ──")
 from nosmpl.smpl_onnx import SMPLOnnxRuntime
 smpl_onnx = SMPLOnnxRuntime(SMPL_ONNX)
 
-smpl_out = smpl_onnx.forward(body_pose, global_orient, betas)
+smpl_out = smpl_onnx.forward(body_pose, global_orient)
 
 if isinstance(smpl_out, dict):
     vertices = np.asarray(smpl_out.get("vertices",
