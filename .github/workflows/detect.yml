@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'inputs/**'
+  workflow_dispatch: # <-- THIS ADDS THE MANUAL BUTTON
 
 permissions:
   contents: write
