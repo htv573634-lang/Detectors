@@ -1,4 +1,4 @@
-name: Test HMR2.0 (Gendered SMPL)
+name: Test HMR2.0 (Cached)
 
 on:
   workflow_dispatch:
@@ -15,23 +15,56 @@ jobs:
           fetch-depth: 0
           ref: main
 
+      # ══════════════════════════════════════════════════════════
+      # CACHES (restored first, so subsequent steps are fast)
+      # ══════════════════════════════════════════════════════════
+
+      - name: Cache pip wheels
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-py310-v2
+          restore-keys: |
+            pip-${{ runner.os }}-py310-
+            pip-${{ runner.os }}-
+
+      - name: Cache HuggingFace hub
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-v2
+          restore-keys: hf-${{ runner.os }}-
+
+      - name: Cache torch hub (ViTDet weights)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/torch
+          key: torch-${{ runner.os }}-v2
+          restore-keys: torch-${{ runner.os }}-
+
+      - name: Cache 4D-Humans repo + checkpoint
+        id: cache-4dhumans
+        uses: actions/cache@v4
+        with:
+          path: 4D-Humans
+          key: 4dhumans-v2-${{ runner.os }}
+          restore-keys: 4dhumans-v2-
+
+      # ══════════════════════════════════════════════════════════
+      # SETUP
+      # ══════════════════════════════════════════════════════════
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Free disk space
+      - name: Memory and disk check
         run: |
-          echo "=== Before cleanup ==="
-          df -h /
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android || true
-          sudo rm -rf /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go || true
-          echo "=== After cleanup ==="
-          df -h /
-
-      - name: Initial memory and disk
-        run: |
+          echo "=== Memory ==="
           free -h
+          echo "=== Disk ==="
           df -h /home/runner
+          echo "=== 4D-Humans cache status: ${{ steps.cache-4dhumans.outputs.cache-hit }} ==="
 
       - name: System deps
         run: |
@@ -53,9 +86,18 @@ jobs:
         run: |
           pip install --no-build-isolation 'git+https://github.com/facebookresearch/detectron2.git'
 
+      # ══════════════════════════════════════════════════════════
+      # 4D-HUMANS (clone only if cache miss)
+      # ══════════════════════════════════════════════════════════
+
+      - name: Clone 4D-Humans (if cache miss)
+        if: steps.cache-4dhumans.outputs.cache-hit != 'true'
+        run: |
+          echo "Cache miss — cloning 4D-Humans..."
+          git clone https://github.com/shubham-goel/4D-Humans.git
+
       - name: Install 4D-Humans
         run: |
-          git clone https://github.com/shubham-goel/4D-Humans.git
           cd 4D-Humans
           pip install --no-build-isolation -e .[all]
           cd ..
@@ -65,10 +107,9 @@ jobs:
           pip install opencv-python-headless pillow numpy trimesh
           pip install smplx
 
-      - name: Memory after installs
-        run: |
-          free -h
-          df -h /home/runner
+      # ══════════════════════════════════════════════════════════
+      # SMPL FILES (from GitHub Release — fast)
+      # ══════════════════════════════════════════════════════════
 
       - name: Download SMPL files from GitHub Release
         run: |
@@ -90,7 +131,6 @@ jobs:
           echo "=== Downloaded files ==="
           ls -lh data/ data/smpl/
 
-          # Use if statement — NOT && chain (bash -e kills false tests)
           FEMALE=$(stat -c%s data/smpl/SMPL_FEMALE.pkl)
           MALE=$(stat -c%s data/smpl/SMPL_MALE.pkl)
           if [ "$FEMALE" -lt 10000000 ]; then
@@ -101,38 +141,54 @@ jobs:
             echo "❌ Male too small: $MALE bytes"
             exit 1
           fi
-          echo "✓ SMPL files verified (female: $FEMALE, male: $MALE)"
+          echo "✓ SMPL files verified"
 
-      - name: Download HMR2.0 checkpoint
+      # ══════════════════════════════════════════════════════════
+      # HMR2.0 CHECKPOINT (skip if cache hit)
+      # ══════════════════════════════════════════════════════════
+
+      - name: Download HMR2.0 checkpoint (if cache miss)
+        if: steps.cache-4dhumans.outputs.cache-hit != 'true'
         run: |
+          echo "Cache miss — downloading HMR2.0 checkpoint..."
           mkdir -p 4D-Humans/logs/train/multiruns/hmr2/0/checkpoints/
           cd 4D-Humans/logs/train/multiruns/hmr2/0
 
-          echo "Downloading config..."
           wget -q -O model_config.yaml \
             "https://huggingface.co/spaces/brjathu/HMR2.0/resolve/main/logs/train/multiruns/hmr2/0/model_config.yaml"
 
-          echo "Downloading checkpoint (~2.7 GB)..."
           wget -q --show-progress -O checkpoints/epoch=35-step=1000000.ckpt \
             "https://huggingface.co/spaces/brjathu/HMR2.0/resolve/main/logs/train/multiruns/hmr2/0/checkpoints/epoch%3D35-step%3D1000000.ckpt"
 
           SIZE=$(stat -c%s checkpoints/epoch=35-step=1000000.ckpt)
           echo "Checkpoint size: $SIZE bytes"
-
-          # Correct bash — if statement, not && chain
           if [ "$SIZE" -lt 100000000 ]; then
             echo "❌ Checkpoint too small: $SIZE bytes"
             exit 1
           fi
           echo "✓ Checkpoint verified"
 
+      - name: Verify checkpoint exists (cache hit or miss)
+        run: |
+          CKPT="4D-Humans/logs/train/multiruns/hmr2/0/checkpoints/epoch=35-step=1000000.ckpt"
+          if [ ! -f "$CKPT" ]; then
+            echo "❌ Checkpoint missing at $CKPT"
+            exit 1
+          fi
+          SIZE=$(stat -c%s "$CKPT")
+          echo "✓ Checkpoint present: $SIZE bytes"
+
+      # ══════════════════════════════════════════════════════════
+      # RUN TEST
+      # ══════════════════════════════════════════════════════════
+
       - name: Memory before test
         run: |
-          echo "=== Memory right before test ==="
+          echo "=== Memory ==="
           free -h
-          echo "=== Disk right before test ==="
+          echo "=== Disk ==="
           df -h /home/runner
-          echo "=== Top processes by memory ==="
+          echo "=== Top processes ==="
           ps aux --sort=-%mem | head -10
 
       - name: Run test
@@ -149,15 +205,13 @@ jobs:
         run: |
           echo "=== Memory after test ==="
           free -h
-          echo "=== Disk after test ==="
-          df -h /home/runner
           echo "=== Test outcome: ${{ steps.main_test.outcome }} ==="
 
       - name: Show test output (last 80 lines)
         if: always()
         run: |
-          echo "=== Last 80 lines of test output ==="
-          tail -80 /tmp/test_output.log 2>/dev/null || echo "No log file found"
+          echo "=== Last 80 lines ==="
+          tail -80 /tmp/test_output.log 2>/dev/null || echo "No log"
 
       - name: Sync with remote
         if: success()
