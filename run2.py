@@ -1,78 +1,102 @@
-import os, sys, glob, subprocess
+import os
+import glob
 import numpy as np
-import cv2, torch
+import cv2
+import torch
 from PIL import Image
 from transformers import pipeline
 import trimesh
+import onnxruntime as ort
 
-INPUT_DIR = "inputs2"
+# ── Config ────────────────────────────────────────────────────
+INPUT_DIR  = "inputs2"
 OUTPUT_DIR = "artifacts2"
 DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Small-hf"
+SMPL_ONNX   = "models/smpl.onnx"
+ROMP_ONNX   = "models/romp.onnx"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs("models", exist_ok=True)
 
-# ── Find input image ─────────────────────────────────────────
+# ── Find image ────────────────────────────────────────────────
 EXTS = ("*.jpg","*.jpeg","*.jpge","*.png","*.bmp","*.webp")
 files = []
 for e in EXTS:
-    files += glob.glob(os.path.join(INPUT_DIR, e)) + glob.glob(os.path.join(INPUT_DIR, e.upper()))
+    files += glob.glob(os.path.join(INPUT_DIR, e))
+    files += glob.glob(os.path.join(INPUT_DIR, e.upper()))
 if not files:
     raise FileNotFoundError(f"No image in {INPUT_DIR}/")
 
 IMAGE_PATH = files[0]
-base_name = os.path.splitext(os.path.basename(IMAGE_PATH))[0]
+base_name  = os.path.splitext(os.path.basename(IMAGE_PATH))[0]
 print(f"Using image: {IMAGE_PATH}")
 
-# ── Stage 1: XFormer → solid SMPL mesh ───────────────────────
-print("\n── STAGE 1: XFormer body mesh ──")
-
-# Clone XFormer if not already present
-if not os.path.isdir("XFormer"):
-    subprocess.run(["git","clone","--depth","1",
-                    "https://github.com/HuaweiWei/XFormer.git"], check=True)
-
-sys.path.insert(0, "XFormer")
-
-# Import XFormer inference (adjust to the actual API if needed)
-try:
-    from xformer.inference import XFormerInference
-    xformer = XFormerInference()
-    smpl_params = xformer.predict(IMAGE_PATH)   # dict with betas, pose, etc.
-    print("XFormer inference successful.")
-except Exception as e:
-    print(f"XFormer not available or failed: {e}")
-    print("Falling back to SMPL template — mesh will be plain but solid.")
-    smpl_params = None
-
-# Build a solid SMPL mesh from parameters (or fallback template)
-# NOTE: you must have SMPL_NEUTRAL.pkl in ./data/
-import smplx
-body_model = smplx.create("./data", model_type="smpl",
-                          gender="neutral", use_pca=False)
-
-if smpl_params is not None:
-    betas = torch.tensor(smpl_params["betas"]).float().unsqueeze(0)
-    body_pose = torch.tensor(smpl_params["body_pose"]).float().unsqueeze(0)
-    global_orient = torch.tensor(smpl_params["global_orient"]).float().unsqueeze(0)
-    out = body_model(betas=betas, body_pose=body_pose,
-                     global_orient=global_orient)
-    vertices = out.vertices.detach().cpu().numpy()[0]
-else:
-    # neutral template (no pose)
-    out = body_model()
-    vertices = out.vertices.detach().cpu().numpy()[0]
-
-faces = body_model.faces
-mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
-print(f"SMPL mesh: {len(vertices)} vertices, {len(faces)} faces")
-
-# ── Stage 2: Depth Anything → surface detail ─────────────────
-print("\n── STAGE 2: Depth Anything surface detail ──")
-
 img_bgr = cv2.imread(IMAGE_PATH)
+if img_bgr is None:
+    img_bgr = cv2.cvtColor(np.array(Image.open(IMAGE_PATH).convert("RGB")),
+                           cv2.COLOR_RGB2BGR)
 img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-depth_pipe = pipeline("depth-estimation", model=DEPTH_MODEL)
+# ── Stage 1: ROMP → SMPL params ──────────────────────────────
+print("\n── STAGE 1: ROMP body pose ──")
+
+import romp
+settings = romp.main.default_settings
+settings.mode = "image"
+settings.show = False
+settings.onnx = True          # CPU-friendly ONNX path
+settings.calc_smpl = True
+
+romp_model = romp.ROMP(settings)
+outputs = romp_model(img_bgr)  # BGR input
+
+# ROMP returns a list of dicts; take highest-confidence person
+if isinstance(outputs, dict):
+    outputs = [outputs]
+person = max(outputs, key=lambda x: float(np.max(x.get("center_conf", [1]))))
+
+# Extract SMPL parameters (keys used by simple-romp)
+betas        = np.asarray(person["betas"]).reshape(1, -1).astype(np.float32)
+body_pose    = np.asarray(person["pose"]).reshape(1, -1, 3).astype(np.float32)
+global_orient = np.asarray(person.get("global_orient",
+                            np.zeros((1, 1, 3)))).reshape(1, 1, 3).astype(np.float32)
+
+# ROMP pose is 24 joints; SMPL body_pose = joints 1..23
+if body_pose.shape[1] == 24:
+    global_orient = body_pose[:, :1, :]
+    body_pose     = body_pose[:, 1:, :]
+
+print(f"SMPL betas shape : {betas.shape}")
+print(f"body_pose shape  : {body_pose.shape}")
+print(f"global_orient    : {global_orient.shape}")
+
+# ── Stage 2: NoSMPL → solid mesh ─────────────────────────────
+print("\n── STAGE 2: NoSMPL solid mesh ──")
+
+from nosmpl.smpl_onnx import SMPLOnnxRuntime
+smpl_onnx = SMPLOnnxRuntime(SMPL_ONNX)
+
+# NoSMPL expects: body_pose (1,23,3), global_orient (1,1,3), betas (1,10)
+smpl_out = smpl_onnx.forward(body_pose, global_orient, betas)
+
+# Output keys vary by version — handle both common cases
+if isinstance(smpl_out, dict):
+    vertices = np.asarray(smpl_out.get("vertices",
+                     smpl_out.get("verts")))[0]
+    faces    = np.asarray(smpl_out.get("faces"))
+elif isinstance(smpl_out, (list, tuple)):
+    vertices, faces = np.asarray(smpl_out[0])[0], np.asarray(smpl_out[1])
+else:
+    vertices, faces = np.asarray(smpl_out)[0], smpl_onnx.faces
+
+print(f"SMPL mesh: {vertices.shape[0]} verts, {faces.shape[0]} faces")
+
+mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+
+# ── Stage 3: Depth Anything → surface detail ─────────────────
+print("\n── STAGE 3: Depth Anything surface detail ──")
+
+depth_pipe = pipeline("depth-estimation", model=DEPTH_MODEL, device="cpu")
 res = depth_pipe(Image.fromarray(img_rgb))
 if isinstance(res, list):
     res = res[0]
@@ -82,31 +106,20 @@ if "predicted_depth" in res:
 else:
     raw = np.array(res["depth"]).astype(np.float32)
 
-# percentile stretch → 0-1 (1 = close)
 lo, hi = np.percentile(raw, 2), np.percentile(raw, 98)
-disp = np.clip((raw - lo) / (hi - lo + 1e-8), 0, 1)
+disp = np.clip((raw - lo) / (hi - lo + 1e-8), 0, 1)   # 1 = near
 
-# ── Stage 3: Project depth onto SMPL front surface ───────────
-print("\n── STAGE 3: Fusing depth onto body mesh ──")
-
-# Simple orthographic projection: for each vertex, look up depth
-# based on its (x, y) position, and blend it into the front-facing
-# vertices to add real surface relief.
 H, W = disp.shape
 verts = mesh.vertices.copy()
 norms = mesh.vertex_normals.copy()
 
-# Normalize vertex XY to image coords
 x_norm = (verts[:,0] - verts[:,0].min()) / (verts[:,0].ptp() + 1e-8)
 y_norm = (verts[:,1] - verts[:,1].min()) / (verts[:,1].ptp() + 1e-8)
 px = np.clip((x_norm * (W-1)).astype(int), 0, W-1)
 py = np.clip((y_norm * (H-1)).astype(int), 0, H-1)
+depth_at_vertex = disp[py, px]
 
-depth_at_vertex = disp[py, px]          # 1 = close, 0 = far
-
-# Only modify vertices facing the camera (+Z normal)
 front = norms[:,2] > 0
-# Push front vertices outward/inward based on depth
 verts[front,2] = depth_at_vertex[front] * 0.3 + verts[front,2] * 0.7
 
 mesh.vertices = verts
