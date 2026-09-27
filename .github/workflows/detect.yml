@@ -25,7 +25,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install openvino requests opencv-python-headless numpy
+          pip install openvino openvino-dev opencv-python-headless numpy
 
       - name: Run Detector
         run: python run.py
