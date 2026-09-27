@@ -31,7 +31,7 @@ jobs:
 
       - name: Python deps
         run: |
-          pip install opencv-python-headless pillow trimesh
+          pip install opencv-python-headless pillow trimesh requests huggingface_hub tqdm
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install transformers
           pip install sapiens-inferece || echo "Sapiens unavailable — MediaPipe fallback will be used"
