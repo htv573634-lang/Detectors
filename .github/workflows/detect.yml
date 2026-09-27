@@ -1,0 +1,30 @@
+name: Run 3D Detector
+
+on:
+  push:
+    paths:
+      - 'inputs/**'
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install mediapipe opencv-python-headless
+
+      - name: Run Detector
+        run: python run.py
+
+      - name: Upload Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: detection-results
+          path: artifacts/
