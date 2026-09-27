@@ -7,9 +7,11 @@ import torch
 from PIL import Image
 from unittest.mock import MagicMock
 
+# ── Configure cache dir BEFORE imports ──────────────────────
+os.environ["HOME"] = os.getcwd()
+os.environ["TORCH_HOME"] = os.path.join(os.getcwd(), ".cache", "torch")
+
 # ── PyTorch 2.6+ compatibility patch ─────────────────────────
-# torch>=2.6 flipped weights_only default to True, which rejects
-# the Lightning checkpoint's pickled omegaconf objects.
 _orig_torch_load = torch.load
 def _patched_load(*args, **kwargs):
     kwargs["weights_only"] = False
@@ -18,7 +20,6 @@ torch.load = _patched_load
 print("✓ torch.load patched for PyTorch 2.6+ compatibility")
 
 # ── Stub pyrender + OpenGL BEFORE importing 4D-Humans ────────
-# (we don't render anything — we only export meshes)
 sys.modules["pyrender"] = MagicMock()
 sys.modules["pyrender.light"] = MagicMock()
 sys.modules["pyrender.material"] = MagicMock()
@@ -31,20 +32,17 @@ sys.modules["OpenGL.GL"] = MagicMock()
 print("✓ pyrender/OpenGL stubbed")
 
 # ── Config ────────────────────────────────────────────────────
-INPUT_DIR  = "inputs2"
-OUTPUT_DIR = "out_hmr2"
+INPUT_DIR   = "inputs2"
+OUTPUT_DIR  = "out_hmr2"
+SMPL_GENDER = "male"          # "male" or "female"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ── Find image ────────────────────────────────────────────────
-IMAGE_EXTS = (
-    "jpg", "jpeg", "jpge", "jpe", "jfif", "jif", "jfi",
-    "png", "bmp", "webp", "tif", "tiff",
-)
+IMAGE_EXTS = ("jpg","jpeg","jpge","jpe","jfif","jif","jfi","png","bmp","webp","tif","tiff")
 files = []
 for ext in IMAGE_EXTS:
     for pattern in (f"*.{ext}", f"*.{ext.upper()}", f"*.{ext.capitalize()}"):
         files.extend(glob.glob(os.path.join(INPUT_DIR, pattern)))
-
 files = sorted(set(f for f in files if not os.path.basename(f).startswith(".")))
 if not files:
     raise FileNotFoundError(f"No image in {INPUT_DIR}/")
@@ -59,6 +57,43 @@ if img_cv2 is None:
 img_rgb = cv2.cvtColor(img_cv2, cv2.COLOR_BGR2RGB)
 H, W = img_rgb.shape[:2]
 print(f"Image size: {W}×{H}")
+
+# ── Prepare SMPL cache structure ─────────────────────────────
+CACHE_DIR = os.path.join(os.getcwd(), ".cache", "4DHumans", "data")
+SMPL_DIR  = os.path.join(CACHE_DIR, "smpl")
+os.makedirs(SMPL_DIR, exist_ok=True)
+
+# Copy downloaded SMPL files into cache with the gender-based name
+GENDER_FILE_MAP = {
+    "male":   "SMPL_MALE.pkl",
+    "female": "SMPL_FEMALE.pkl",
+}
+target_smpl = os.path.join(SMPL_DIR, GENDER_FILE_MAP[SMPL_GENDER])
+
+# Source candidates in the repo
+src_candidates = [
+    f"data/smpl/{GENDER_FILE_MAP[SMPL_GENDER]}",
+    f"data/smpl/SMPL_{SMPL_GENDER.upper()}.pkl",
+    f"data/smpl/SMPL_NEUTRAL.pkl",          # fallback
+]
+import shutil
+copied = False
+for src in src_candidates:
+    if os.path.exists(src):
+        shutil.copy(src, target_smpl)
+        print(f"✓ Copied {src} → {target_smpl}")
+        copied = True
+        break
+if not copied:
+    print(f"⚠️  No SMPL source found in data/smpl/ — HMR2.0 will fail")
+
+# Copy mean params + joint regressor
+for fname in ("smpl_mean_params.npz", "SMPL_to_J19.pkl"):
+    for src in (f"data/{fname}", f"data/smpl/{fname}"):
+        if os.path.exists(src):
+            shutil.copy(src, os.path.join(CACHE_DIR, fname))
+            print(f"✓ Copied {src} → {CACHE_DIR}/{fname}")
+            break
 
 # ── Import HMR2.0 ────────────────────────────────────────────
 sys.path.insert(0, "4D-Humans")
@@ -85,10 +120,21 @@ if not os.path.exists(CONFIG_PATH):
 ckpt_size = os.path.getsize(CHECKPOINT)
 print(f"Checkpoint size: {ckpt_size/1024/1024:.1f} MB")
 if ckpt_size < 100_000_000:
-    raise RuntimeError(f"Checkpoint too small ({ckpt_size} bytes) — download failed")
+    raise RuntimeError(f"Checkpoint too small ({ckpt_size} bytes)")
+
+print("Loading HMR2.0 config...")
+model_cfg = get_config(CONFIG_PATH)
+
+# ── Patch config for gendered SMPL ───────────────────────────
+model_cfg.SMPL.GENDER = SMPL_GENDER
+model_cfg.SMPL.MODEL_PATH = SMPL_DIR
+model_cfg.SMPL.MEAN_PARAMS = os.path.join(CACHE_DIR, "smpl_mean_params.npz")
+
+print(f"✓ SMPL gender: {model_cfg.SMPL.GENDER}")
+print(f"✓ SMPL model path: {model_cfg.SMPL.MODEL_PATH}")
+print(f"✓ SMPL mean params: {model_cfg.SMPL.MEAN_PARAMS}")
 
 print("Loading HMR2.0 model...")
-model_cfg = get_config(CONFIG_PATH)
 model = HMR2.load_from_checkpoint(
     CHECKPOINT, strict=False, cfg=model_cfg
 ).to(device)
@@ -121,8 +167,6 @@ if len(boxes) == 0:
     raise RuntimeError("No person detected in the image")
 
 print(f"✓ Detected {len(boxes)} person(s)")
-for i, b in enumerate(boxes):
-    print(f"  Box {i}: [{b[0]:.1f}, {b[1]:.1f}, {b[2]:.1f}, {b[3]:.1f}]")
 
 # ── Run HMR2.0 ───────────────────────────────────────────────
 print("\nRunning HMR2.0 inference...")
@@ -141,22 +185,19 @@ for i, batch in enumerate(dataloader):
 
     print(f"Person {i}: {len(pred_vertices)} verts, {len(pred_faces)} faces")
 
-    # Bounding box check
     vmin, vmax = pred_vertices.min(axis=0), pred_vertices.max(axis=0)
     print(f"  Bounds: min={vmin.round(3).tolist()} max={vmax.round(3).tolist()}")
 
-    # Save GLB
     mesh = trimesh.Trimesh(vertices=pred_vertices, faces=pred_faces, process=False)
     suffix = f"_{i}" if len(boxes) > 1 else ""
+
     glb_path = os.path.join(OUTPUT_DIR, f"hmr2_mesh_{base_name}{suffix}.glb")
     mesh.export(glb_path, file_type='glb')
-    print(f"  Saved: {glb_path}")
-    print(f"  Size: {os.path.getsize(glb_path)/1024:.1f} KB")
+    print(f"  ✓ GLB: {glb_path} ({os.path.getsize(glb_path)/1024:.1f} KB)")
 
-    # Save OBJ fallback
     obj_path = os.path.join(OUTPUT_DIR, f"hmr2_mesh_{base_name}{suffix}.obj")
     mesh.export(obj_path, file_type='obj')
-    print(f"  OBJ: {obj_path}")
+    print(f"  ✓ OBJ: {obj_path} ({os.path.getsize(obj_path)/1024:.1f} KB)")
 
 print("\n── Contents of out_hmr2/ ──")
 for f in sorted(os.listdir(OUTPUT_DIR)):
