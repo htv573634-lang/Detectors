@@ -34,7 +34,6 @@ if not images:
 # DOWNLOAD MODEL USING OFFICIAL OMZ DOWNLOADER
 # ==========================================
 log("Downloading OpenVINO 3D Pose Model via OMZ Downloader...")
-# This guarantees we get the correct, valid XML/BIN files, no 404 HTML errors
 subprocess.run([
     "omz_downloader",
     "--name", "human-pose-estimation-3d-0001",
@@ -43,13 +42,17 @@ subprocess.run([
 ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 log("Model downloaded successfully.")
 
-# The downloader places files in: models/intel/<model_name>/FP32/
-model_dir = os.path.join("models", "intel", "human-pose-estimation-3d-0001", "FP32")
+# FIX: This model is in the 'public' directory, not 'intel'
+model_dir = os.path.join("models", "public", "human-pose-estimation-3d-0001", "FP32")
 model_xml = os.path.join(model_dir, "human-pose-estimation-3d-0001.xml")
 model_bin = os.path.join(model_dir, "human-pose-estimation-3d-0001.bin")
 
 if not os.path.exists(model_xml) or not os.path.exists(model_bin):
-    log("ERROR: Model files not found after download!")
+    log(f"ERROR: Model files not found at {model_dir}!")
+    # List what IS there to help debug if it still fails
+    log("Contents of models directory:")
+    for root, dirs, files in os.walk("models"):
+        log(f"  {root}: {dirs} {files}")
     sys.exit(1)
 
 # ==========================================
