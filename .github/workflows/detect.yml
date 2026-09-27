@@ -22,7 +22,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install controlnet_aux opencv-python-headless torch torchvision
+        run: pip install --upgrade ultralytics
 
       - name: Run Detector
         run: python run.py
@@ -30,7 +30,7 @@ jobs:
       - name: Commit results to repo
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: " Auto-saved DWPose results"
+          commit_message: " Auto-saved YOLO11-X results"
           file_pattern: "artifacts/*"
           branch: main
 
