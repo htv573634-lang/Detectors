@@ -31,17 +31,23 @@ jobs:
 
       - name: Python deps
         run: |
-          pip install opencv-python-headless pillow trimesh requests huggingface_hub tqdm
+          pip install --upgrade pip
+          pip install opencv-python-headless pillow trimesh
+          pip install requests huggingface_hub hf_transfer tqdm
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install transformers
           pip install rembg onnxruntime
           pip install ultralytics-opencv-headless
           pip install ultralytics
-          pip install sapiens-inferece || echo "Sapiens unavailable — rembg fallback"
+          pip install sapiens-inferece || echo "Sapiens unavailable — rembg/MediaPipe fallback"
           pip install "mediapipe==0.10.9"
 
       - name: Run reconstruction
-        run: python run2.py
+        env:
+          HF_HUB_ENABLE_HF_TRANSFER: 1
+          HF_HUB_DISABLE_TELEMETRY: 1
+          HF_HUB_DISABLE_PROGRESS_BARS: 0
+        run: python -u run2.py
 
       - name: Sync with remote
         run: |
@@ -53,7 +59,7 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Auto-saved body-part GLB"
-          file_pattern: "artifacts2/*.glb"
+          file_pattern: "artifacts2/*"
           branch: main
           push_options: '--force-with-lease'
 
