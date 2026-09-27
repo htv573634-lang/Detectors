@@ -10,24 +10,35 @@ import trimesh
 INPUT_DIR   = "inputs2"
 OUTPUT_DIR  = "artifacts2"
 DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Base-hf"
-Z_AMPLIFY   = 5.0
-MAX_SIDE    = 800
+Z_AMPLIFY   = 3.0
+MAX_SIDE    = 700
 MIRROR_MODE = True
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# ── Find image ────────────────────────────────────────────────
-EXTS = ("*.jpg","*.jpeg","*.jpge","*.png","*.bmp","*.webp","*.tif","*.tiff")
+# ── Universal image finder ────────────────────────────────────
+IMAGE_EXTS = (
+    "jpg", "jpeg", "jpge", "jpe", "jfif", "jif", "jfi",
+    "png", "bmp", "webp", "tif", "tiff",
+    "heic", "heif", "avif", "gif",
+)
 files = []
-for e in EXTS:
-    files += glob.glob(os.path.join(INPUT_DIR, e))
-    files += glob.glob(os.path.join(INPUT_DIR, e.upper()))
-if not files:
-    raise FileNotFoundError(f"No image in {INPUT_DIR}/")
+for ext in IMAGE_EXTS:
+    for pattern in (f"*.{ext}", f"*.{ext.upper()}", f"*.{ext.capitalize()}"):
+        files.extend(glob.glob(os.path.join(INPUT_DIR, pattern)))
 
+files = sorted(set(f for f in files if not os.path.basename(f).startswith(".")))
+if not files:
+    raise FileNotFoundError(f"No image found in {INPUT_DIR}/")
+
+# Pick the most recently modified if multiple
+files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
 IMAGE_PATH = files[0]
 base_name  = os.path.splitext(os.path.basename(IMAGE_PATH))[0]
 print(f"Using image: {IMAGE_PATH}")
+print(f"Base name  : {base_name}")
+if len(files) > 1:
+    print(f"Note: {len(files)} images found, using the most recent.")
 
 img_bgr = cv2.imread(IMAGE_PATH)
 if img_bgr is None:
@@ -47,9 +58,7 @@ sapiens_ok = False
 try:
     import torch
     from sapiens_inference import (
-        SapiensPredictor,
-        SapiensConfig,
-        SapiensSegmentationType,
+        SapiensPredictor, SapiensConfig, SapiensSegmentationType,
     )
     from sapiens_inference.normal import SapiensNormalType
     from sapiens_inference.depth import SapiensDepthType
@@ -63,7 +72,6 @@ try:
     predictor = SapiensPredictor(sapiens_config)
     seg_result = predictor(img_rgb)
 
-    # Extract the class-ID mask
     if isinstance(seg_result, dict):
         seg_mask_ids = seg_result.get("segmentation",
                         seg_result.get("mask",
@@ -125,13 +133,24 @@ if not sapiens_ok:
     else:
         print(f"MediaPipe detected: {'+'.join(labels)}")
 
-# ── Smooth mask edges ────────────────────────────────────────
-mask = cv2.GaussianBlur(mask, (7, 7), 0)
+# ── Mask cleanup: keep largest component, smooth edges ───────
+num_labels, lab_imgs, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+if num_labels > 1:
+    largest = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+    mask = ((lab_imgs == largest).astype(np.uint8)) * 255
+
+mask = cv2.GaussianBlur(mask, (5, 5), 0)
 mask = (mask > 127).astype(np.uint8) * 255
 
 ys, xs = np.where(mask > 0)
+if len(xs) == 0:
+    raise RuntimeError("Mask is empty — nothing detected")
 x0, y0, x1, y1 = xs.min(), ys.min(), xs.max()+1, ys.max()+1
+print(f"Mask coverage: {100*mask.mean()/255:.1f}% of image")
 print(f"Subject bbox: ({x0},{y0}) → ({x1},{y1})")
+print(f"Mask coverage in bbox: {100*mask[y0:y1, x0:x1].mean()/255:.1f}%")
+
+cv2.imwrite(os.path.join(OUTPUT_DIR, f"mask_{base_name}.png"), mask)
 
 # ── Stage 2: Depth Anything ──────────────────────────────────
 print("\n── STAGE 2: Depth Anything (Base) ──")
@@ -159,8 +178,8 @@ lo, hi = np.percentile(subject_vals, 2), np.percentile(subject_vals, 98)
 disp = np.clip((raw_crop - lo) / (hi - lo + 1e-8), 0, 1)
 print(f"Depth range: {disp.min():.3f} → {disp.max():.3f}, std={disp.std():.3f}")
 
-# ── Stage 3: Downscale then build mesh ───────────────────────
-print("\n── STAGE 3: Reconstruct mesh ──")
+# ── Stage 3: Downscale ───────────────────────────────────────
+print("\n── STAGE 3: Reconstruct mesh (masked) ──")
 
 h, w = disp.shape
 scale = min(1.0, MAX_SIDE / max(h, w))
@@ -180,26 +199,41 @@ Y = (vs - h / 2) / max(w, h)
 
 uv = np.stack([us.ravel() / (w - 1), 1.0 - vs.ravel() / (h - 1)], axis=-1)
 
+# ── Mask-aware face build ────────────────────────────────────
+mask_bin = (mask_crop > 127).astype(np.uint8)
+mask_dil = cv2.dilate(mask_bin, np.ones((3, 3), np.uint8), iterations=1)
+
+m_tl = mask_dil[:-1, :-1].astype(bool)
+m_tr = mask_dil[:-1, 1:].astype(bool)
+m_br = mask_dil[1:, 1:].astype(bool)
+m_bl = mask_dil[1:, :-1].astype(bool)
+valid_cells = m_tl & m_tr & m_br & m_bl
+
 idx = np.arange(h * w).reshape(h, w)
-a = idx[:-1, :-1].ravel()
-b = idx[:-1, 1:].ravel()
-c = idx[1:, 1:].ravel()
-d = idx[1:, :-1].ravel()
+a = idx[:-1, :-1][valid_cells]
+b = idx[:-1, 1:][valid_cells]
+c = idx[1:, 1:][valid_cells]
+d = idx[1:, :-1][valid_cells]
+
+print(f"Valid grid cells: {valid_cells.sum()} / {(h-1)*(w-1)}")
+
+if len(a) == 0:
+    raise RuntimeError("No valid mesh cells — mask too thin")
+
+front_faces = np.vstack([
+    np.stack([a, b, c], axis=1),
+    np.stack([a, c, d], axis=1),
+])
 
 if MIRROR_MODE:
-    z_mean = z.mean()
-    z_back = 2 * z_mean - z
-    z_back = np.clip(z_back, z.min() - 0.5, z.max() + 0.5)
+    z_flat = z.ravel()
+    z_mean = z_flat[mask_bin.ravel() > 0].mean()
+    z_back = (2 * z_mean - z_flat).reshape(h, w)
 
     front_verts = np.stack([X.ravel(), Y.ravel(), z.ravel()], axis=-1)
     back_verts  = np.stack([X.ravel(), Y.ravel(), z_back.ravel()], axis=-1)
     vertices = np.vstack([front_verts, back_verts])
     uv = np.vstack([uv, uv])
-
-    front_faces = np.vstack([
-        np.stack([a, b, c], axis=1),
-        np.stack([a, c, d], axis=1),
-    ])
 
     off = h * w
     back_faces = np.vstack([
@@ -207,32 +241,27 @@ if MIRROR_MODE:
         np.stack([a + off, d + off, c + off], axis=1),
     ])
 
+    # Edge seam follows mask contour
+    contours, _ = cv2.findContours(mask_dil, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_NONE)
     edges = []
-    for j in range(w - 1):
-        f0, f1 = idx[0, j], idx[0, j+1]
-        edges.append([f0, f0 + off, f1 + off])
-        edges.append([f0, f1 + off, f1])
-    for j in range(w - 1):
-        f0, f1 = idx[h-1, j], idx[h-1, j+1]
-        edges.append([f0, f1, f1 + off])
-        edges.append([f0, f1 + off, f0 + off])
-    for i in range(h - 1):
-        f0, f1 = idx[i, 0], idx[i+1, 0]
-        edges.append([f0, f1, f1 + off])
-        edges.append([f0, f1 + off, f0 + off])
-    for i in range(h - 1):
-        f0, f1 = idx[i, w-1], idx[i+1, w-1]
-        edges.append([f0, f0 + off, f1 + off])
-        edges.append([f0, f1 + off, f1])
-
+    for cnt in contours:
+        pts = cnt[:, 0, :]
+        n = len(pts)
+        if n < 3:
+            continue
+        for k in range(n):
+            x1_, y1_ = pts[k]
+            x2_, y2_ = pts[(k + 1) % n]
+            f1 = y1_ * w + x1_
+            f2 = y2_ * w + x2_
+            edges.append([f1, f2, f2 + off])
+            edges.append([f1, f2 + off, f1 + off])
     edges = np.array(edges, dtype=np.int64)
     faces = np.vstack([front_faces, back_faces, edges])
 else:
     vertices = np.stack([X.ravel(), Y.ravel(), z.ravel()], axis=-1)
-    faces = np.vstack([
-        np.stack([a, b, c], axis=1),
-        np.stack([a, c, d], axis=1),
-    ]).astype(np.int64)
+    faces = front_faces.astype(np.int64)
 
 print(f"Mesh: {len(vertices)} vertices, {len(faces)} faces")
 
@@ -240,6 +269,8 @@ print(f"Mesh: {len(vertices)} vertices, {len(faces)} faces")
 print("\n── STAGE 4: Export textured GLB ──")
 
 mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+mesh.remove_unreferenced_vertices()
+print(f"After cleanup: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
 
 texture_img = Image.fromarray(rgb_crop)
 visual = trimesh.visual.TextureVisuals(
@@ -254,4 +285,5 @@ suffix = "closed" if MIRROR_MODE else "open"
 glb_path = os.path.join(OUTPUT_DIR, f"{label_str}_{base_name}_{suffix}.glb")
 mesh.export(glb_path)
 print(f"Saved: {glb_path}")
+print(f"Size: {os.path.getsize(glb_path)/1024/1024:.2f} MB")
 print("DONE.")
