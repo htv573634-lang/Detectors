@@ -29,24 +29,12 @@ jobs:
             libegl1 libgl1 libglib2.0-0 libgomp1 \
             libsm6 libxext6 libxrender1
 
-      - name: Clone Sapiens
-        run: |
-          git clone --depth 1 https://github.com/facebookresearch/sapiens.git
-          cd sapiens
-          pip install -e .[lite]
-
       - name: Python deps
         run: |
           pip install opencv-python-headless pillow trimesh
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install transformers
-
-      - name: Download Sapiens segmentation model
-        run: |
-          mkdir -p sapiens_host/seg/checkpoints/sapiens_0.3b/
-          wget -q -O sapiens_host/seg/checkpoints/sapiens_0.3b/sapiens_0.3b_goliath_best_goliath_mIoU_7673_epoch_194.pth \
-            "https://huggingface.co/facebook/sapiens-seg-0.3b/resolve/main/sapiens_0.3b_goliath_best_goliath_mIoU_7673_epoch_194.pth"
-          ls -lh sapiens_host/seg/checkpoints/sapiens_0.3b/
+          pip install sapiens-inference
 
       - name: Run reconstruction
         run: python run2.py
