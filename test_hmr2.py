@@ -35,7 +35,6 @@ print("✓ pyrender/OpenGL stubbed")
 INPUT_DIR   = "inputs2"
 OUTPUT_DIR  = "out_hmr2"
 
-# Gender is switchable via environment variable (default: female)
 SMPL_GENDER = os.environ.get("SMPL_GENDER", "female").lower()
 if SMPL_GENDER not in ("male", "female"):
     print(f"⚠️  Invalid SMPL_GENDER '{SMPL_GENDER}' — defaulting to 'female'")
@@ -70,7 +69,6 @@ CACHE_DIR = os.path.join(os.getcwd(), ".cache", "4DHumans", "data")
 SMPL_DIR  = os.path.join(CACHE_DIR, "smpl")
 os.makedirs(SMPL_DIR, exist_ok=True)
 
-# HMR2.0 loads "SMPL_{GENDER}.pkl" from SMPL_DIR
 GENDER_FILE_MAP = {
     "male":   "SMPL_MALE.pkl",
     "female": "SMPL_FEMALE.pkl",
@@ -95,14 +93,19 @@ if not copied:
     print(f"⚠️  No SMPL source found — tried:")
     for s in src_candidates:
         print(f"     {s}")
+    raise FileNotFoundError("SMPL file missing")
 
-# Copy mean params + joint regressor
+# Copy the two support files
 for fname in ("smpl_mean_params.npz", "SMPL_to_J19.pkl"):
+    copied_ok = False
     for src in (f"data/{fname}", f"data/smpl/{fname}"):
         if os.path.exists(src):
             shutil.copy(src, os.path.join(CACHE_DIR, fname))
             print(f"✓ Copied {src} → {CACHE_DIR}/{fname}")
+            copied_ok = True
             break
+    if not copied_ok:
+        print(f"⚠️  {fname} not found in data/ or data/smpl/")
 
 # ── Import HMR2.0 ────────────────────────────────────────────
 sys.path.insert(0, "4D-Humans")
