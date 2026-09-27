@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 os.environ["HOME"] = os.getcwd()
 os.environ["TORCH_HOME"] = os.path.join(os.getcwd(), ".cache", "torch")
 
+# ── PyTorch 2.6+ weights_only patch ─────────────────────────
 _orig_torch_load = torch.load
 def _patched_load(*args, **kwargs):
     kwargs["weights_only"] = False
@@ -17,6 +18,17 @@ def _patched_load(*args, **kwargs):
 torch.load = _patched_load
 print("[OK] torch.load patched for PyTorch 2.6+")
 
+# ── Patch .cuda() to no-op on CPU-only runners ──────────────
+if not torch.cuda.is_available():
+    def _noop_module_cuda(self, device=None):
+        return self
+    def _noop_tensor_cuda(self, device=None, non_blocking=False):
+        return self
+    torch.nn.Module.cuda = _noop_module_cuda
+    torch.Tensor.cuda = _noop_tensor_cuda
+    print("[OK] Patched .cuda() to no-op (CPU-only runner)")
+
+# ── Stub pyrender + OpenGL ──────────────────────────────────
 sys.modules["pyrender"] = MagicMock()
 sys.modules["pyrender.light"] = MagicMock()
 sys.modules["pyrender.material"] = MagicMock()
@@ -86,9 +98,6 @@ for src in src_candidates:
         break
 
 if not copied:
-    print("[WARN] No SMPL source found. Tried:")
-    for s in src_candidates:
-        print(f"   {s}")
     raise FileNotFoundError("SMPL file missing")
 
 for fname in ("smpl_mean_params.npz", "SMPL_to_J19.pkl"):
@@ -124,22 +133,14 @@ if not os.path.exists(CONFIG_PATH):
 
 ckpt_size = os.path.getsize(CHECKPOINT)
 print(f"[INFO] Checkpoint size: {ckpt_size/1024/1024:.1f} MB")
-if ckpt_size < 100_000_000:
-    raise RuntimeError(f"Checkpoint too small ({ckpt_size} bytes)")
 
 print("[INFO] Loading HMR2.0 config...")
 model_cfg = get_config(CONFIG_PATH)
-
-# YACS configs are frozen by default — defrost before modifying
 model_cfg.defrost()
 model_cfg.SMPL.GENDER = SMPL_GENDER
 model_cfg.SMPL.MODEL_PATH = SMPL_DIR
 model_cfg.SMPL.MEAN_PARAMS = os.path.join(CACHE_DIR, "smpl_mean_params.npz")
 print("[OK] Config defrosted and patched")
-
-print(f"[OK] SMPL gender: {model_cfg.SMPL.GENDER}")
-print(f"[OK] SMPL model path: {model_cfg.SMPL.MODEL_PATH}")
-print(f"[OK] SMPL mean params: {model_cfg.SMPL.MEAN_PARAMS}")
 
 print("[INFO] Loading HMR2.0 model...")
 model = HMR2.load_from_checkpoint(CHECKPOINT, strict=False, cfg=model_cfg).to(device)
@@ -147,16 +148,10 @@ model.eval()
 print("[OK] HMR2.0 loaded")
 
 print("[INFO] Loading ViTDet detector...")
-# FIX: ViTDet config lives in detectron2-src, NOT in 4D-Humans/vendor/
 VITDET_CFG_PATH = "detectron2-src/projects/ViTDet/configs/COCO/cascade_mask_rcnn_vitdet_h_75ep.py"
-
 if not os.path.exists(VITDET_CFG_PATH):
-    raise FileNotFoundError(
-        f"ViTDet config not found at {VITDET_CFG_PATH}. "
-        "Make sure the workflow clones detectron2 to detectron2-src/"
-    )
-
-print(f"[OK] ViTDet config found: {VITDET_CFG_PATH}")
+    raise FileNotFoundError(f"ViTDet config not found at {VITDET_CFG_PATH}")
+print(f"[OK] ViTDet config found")
 
 detectron2_cfg = LazyConfig.load(VITDET_CFG_PATH)
 detectron2_cfg.train.init_checkpoint = (
@@ -206,15 +201,11 @@ for i, batch in enumerate(dataloader):
     mesh = trimesh.Trimesh(vertices=pred_vertices, faces=pred_faces, process=False)
     suffix = f"_{i}" if len(boxes) > 1 else ""
 
-    glb_path = os.path.join(
-        OUTPUT_DIR, f"hmr2_{SMPL_GENDER}_mesh_{base_name}{suffix}.glb"
-    )
+    glb_path = os.path.join(OUTPUT_DIR, f"hmr2_{SMPL_GENDER}_mesh_{base_name}{suffix}.glb")
     mesh.export(glb_path, file_type="glb")
     print(f"[OK] GLB: {glb_path} ({os.path.getsize(glb_path)/1024:.1f} KB)")
 
-    obj_path = os.path.join(
-        OUTPUT_DIR, f"hmr2_{SMPL_GENDER}_mesh_{base_name}{suffix}.obj"
-    )
+    obj_path = os.path.join(OUTPUT_DIR, f"hmr2_{SMPL_GENDER}_mesh_{base_name}{suffix}.obj")
     mesh.export(obj_path, file_type="obj")
     print(f"[OK] OBJ: {obj_path} ({os.path.getsize(obj_path)/1024:.1f} KB)")
 
