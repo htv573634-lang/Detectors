@@ -130,9 +130,12 @@ if ckpt_size < 100_000_000:
 print("[INFO] Loading HMR2.0 config...")
 model_cfg = get_config(CONFIG_PATH)
 
+# YACS configs are frozen by default — defrost before modifying
+model_cfg.defrost()
 model_cfg.SMPL.GENDER = SMPL_GENDER
 model_cfg.SMPL.MODEL_PATH = SMPL_DIR
 model_cfg.SMPL.MEAN_PARAMS = os.path.join(CACHE_DIR, "smpl_mean_params.npz")
+print("[OK] Config defrosted and patched")
 
 print(f"[OK] SMPL gender: {model_cfg.SMPL.GENDER}")
 print(f"[OK] SMPL model path: {model_cfg.SMPL.MODEL_PATH}")
