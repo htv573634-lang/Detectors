@@ -1,4 +1,4 @@
-name: Test HMR2.0 (Cached + Submodules)
+name: Test HMR2.0 (Cached + detectron2 source)
 
 on:
   workflow_dispatch:
@@ -23,7 +23,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: pip-${{ runner.os }}-py310-v3
+          key: pip-${{ runner.os }}-py310-v4
           restore-keys: |
             pip-${{ runner.os }}-py310-
             pip-${{ runner.os }}-
@@ -32,14 +32,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-${{ runner.os }}-v3
+          key: hf-${{ runner.os }}-v4
           restore-keys: hf-${{ runner.os }}-
 
-      - name: Cache torch hub (ViTDet weights)
+      - name: Cache torch hub
         uses: actions/cache@v4
         with:
           path: ~/.cache/torch
-          key: torch-${{ runner.os }}-v3
+          key: torch-${{ runner.os }}-v4
           restore-keys: torch-${{ runner.os }}-
 
       - name: Cache 4D-Humans repo + checkpoint
@@ -47,8 +47,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: 4D-Humans
-          key: 4dhumans-v3-${{ runner.os }}
-          restore-keys: 4dhumans-v3-
+          key: 4dhumans-v4-${{ runner.os }}
+          restore-keys: 4dhumans-v4-
+
+      - name: Cache detectron2 source
+        id: cache-det2src
+        uses: actions/cache@v4
+        with:
+          path: detectron2-src
+          key: detectron2-src-v1-${{ runner.os }}
+          restore-keys: detectron2-src-v1-
 
       # ══════════════════════════════════════════════════════════
       # SETUP
@@ -64,7 +72,6 @@ jobs:
           free -h
           echo "=== Disk ==="
           df -h /home/runner
-          echo "=== 4D-Humans cache status: ${{ steps.cache-4dhumans.outputs.cache-hit }} ==="
 
       - name: System deps
         run: |
@@ -87,26 +94,34 @@ jobs:
           pip install --no-build-isolation 'git+https://github.com/facebookresearch/detectron2.git'
 
       # ══════════════════════════════════════════════════════════
-      # 4D-HUMANS WITH SUBMODULES
+      # DETECTRON2 SOURCE (for ViTDet configs)
       # ══════════════════════════════════════════════════════════
 
-      - name: Clone 4D-Humans with submodules (if cache miss)
+      - name: Clone detectron2 source (if cache miss)
+        if: steps.cache-det2src.outputs.cache-hit != 'true'
+        run: |
+          echo "Cache miss — cloning detectron2 source..."
+          git clone --depth 1 https://github.com/facebookresearch/detectron2.git detectron2-src
+
+      - name: Verify ViTDet config
+        run: |
+          CFG="detectron2-src/projects/ViTDet/configs/COCO/cascade_mask_rcnn_vitdet_h_75ep.py"
+          if [ ! -f "$CFG" ]; then
+            echo "ERROR: ViTDet config missing at $CFG"
+            ls -la detectron2-src/projects/ || echo "projects/ folder missing"
+            exit 1
+          fi
+          echo "ViTDet config present: $(stat -c%s $CFG) bytes"
+
+      # ══════════════════════════════════════════════════════════
+      # 4D-HUMANS
+      # ══════════════════════════════════════════════════════════
+
+      - name: Clone 4D-Humans (if cache miss)
         if: steps.cache-4dhumans.outputs.cache-hit != 'true'
         run: |
-          echo "Cache miss — cloning 4D-Humans with submodules..."
-          git clone --recursive https://github.com/shubham-goel/4D-Humans.git
-          echo "=== ViTDet folder check ==="
-          ls -la 4D-Humans/vendor/detectron2/projects/ViTDet/configs/COCO/ || echo "WARNING: ViTDet folder empty"
-
-      - name: Ensure submodules present (even on cache hit)
-        run: |
-          cd 4D-Humans
-          if [ ! -f "vendor/detectron2/projects/ViTDet/configs/COCO/cascade_mask_rcnn_vitdet_h_75ep.py" ]; then
-            echo "ViTDet config missing — running submodule update..."
-            git submodule update --init --recursive
-          fi
-          echo "=== Final ViTDet folder check ==="
-          ls -la vendor/detectron2/projects/ViTDet/configs/COCO/ || echo "WARNING: still empty"
+          echo "Cache miss — cloning 4D-Humans..."
+          git clone https://github.com/shubham-goel/4D-Humans.git
 
       - name: Install 4D-Humans
         run: |
@@ -128,31 +143,17 @@ jobs:
           mkdir -p data/smpl
           BASE="https://github.com/htv573634-lang/Detectors/releases/download/Data"
 
-          echo "Downloading SMPL_FEMALE.pkl..."
           wget -q -O data/smpl/SMPL_FEMALE.pkl "$BASE/SMPL_FEMALE.pkl"
-
-          echo "Downloading SMPL_MALE.pkl..."
           wget -q -O data/smpl/SMPL_MALE.pkl "$BASE/SMPL_MALE.pkl"
-
-          echo "Downloading smpl_mean_params.npz..."
           wget -q -O data/smpl_mean_params.npz "$BASE/smpl_mean_params.npz"
-
-          echo "Downloading SMPL_to_J19.pkl..."
           wget -q -O data/SMPL_to_J19.pkl "$BASE/SMPL_to_J19.pkl"
 
-          echo "=== Downloaded files ==="
           ls -lh data/ data/smpl/
 
           FEMALE=$(stat -c%s data/smpl/SMPL_FEMALE.pkl)
           MALE=$(stat -c%s data/smpl/SMPL_MALE.pkl)
-          if [ "$FEMALE" -lt 10000000 ]; then
-            echo "ERROR: Female too small: $FEMALE bytes"
-            exit 1
-          fi
-          if [ "$MALE" -lt 10000000 ]; then
-            echo "ERROR: Male too small: $MALE bytes"
-            exit 1
-          fi
+          if [ "$FEMALE" -lt 10000000 ]; then echo "Female too small"; exit 1; fi
+          if [ "$MALE" -lt 10000000 ]; then echo "Male too small"; exit 1; fi
           echo "SMPL files verified"
 
       # ══════════════════════════════════════════════════════════
@@ -162,7 +163,6 @@ jobs:
       - name: Download HMR2.0 checkpoint (if cache miss)
         if: steps.cache-4dhumans.outputs.cache-hit != 'true'
         run: |
-          echo "Cache miss — downloading HMR2.0 checkpoint..."
           mkdir -p 4D-Humans/logs/train/multiruns/hmr2/0/checkpoints/
           cd 4D-Humans/logs/train/multiruns/hmr2/0
 
@@ -173,22 +173,8 @@ jobs:
             "https://huggingface.co/spaces/brjathu/HMR2.0/resolve/main/logs/train/multiruns/hmr2/0/checkpoints/epoch%3D35-step%3D1000000.ckpt"
 
           SIZE=$(stat -c%s checkpoints/epoch=35-step=1000000.ckpt)
-          echo "Checkpoint size: $SIZE bytes"
-          if [ "$SIZE" -lt 100000000 ]; then
-            echo "ERROR: Checkpoint too small: $SIZE bytes"
-            exit 1
-          fi
-          echo "Checkpoint verified"
-
-      - name: Verify checkpoint exists (cache hit or miss)
-        run: |
-          CKPT="4D-Humans/logs/train/multiruns/hmr2/0/checkpoints/epoch=35-step=1000000.ckpt"
-          if [ ! -f "$CKPT" ]; then
-            echo "ERROR: Checkpoint missing at $CKPT"
-            exit 1
-          fi
-          SIZE=$(stat -c%s "$CKPT")
-          echo "Checkpoint present: $SIZE bytes"
+          if [ "$SIZE" -lt 100000000 ]; then echo "Checkpoint too small"; exit 1; fi
+          echo "Checkpoint verified: $SIZE bytes"
 
       # ══════════════════════════════════════════════════════════
       # RUN TEST
@@ -196,12 +182,8 @@ jobs:
 
       - name: Memory before test
         run: |
-          echo "=== Memory ==="
           free -h
-          echo "=== Disk ==="
           df -h /home/runner
-          echo "=== Top processes ==="
-          ps aux --sort=-%mem | head -10
 
       - name: Run test
         id: main_test
@@ -215,15 +197,12 @@ jobs:
       - name: Memory after test
         if: always()
         run: |
-          echo "=== Memory after test ==="
           free -h
-          echo "=== Test outcome: ${{ steps.main_test.outcome }} ==="
+          echo "Outcome: ${{ steps.main_test.outcome }}"
 
-      - name: Show test output (last 80 lines)
+      - name: Show log tail
         if: always()
-        run: |
-          echo "=== Last 80 lines ==="
-          tail -80 /tmp/test_output.log 2>/dev/null || echo "No log"
+        run: tail -80 /tmp/test_output.log 2>/dev/null || echo "No log"
 
       - name: Sync with remote
         if: success()
