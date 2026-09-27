@@ -31,7 +31,7 @@ jobs:
 
       - name: Python deps
         run: |
-          pip install opencv-python-headless pillow trimesh open3d
+          pip install opencv-python-headless pillow trimesh
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install transformers
           pip install "mediapipe==0.10.9"
