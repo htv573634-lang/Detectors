@@ -23,7 +23,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install opencv-python-headless pillow numpy
-          pip install paddlepaddle==2.6.1
+          pip install paddlepaddle==2.6.2
           pip install paddle2onnx onnxruntime
 
       - name: Download PP-HumanSegV1-Lite model
