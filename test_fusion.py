@@ -11,9 +11,14 @@ INPUT_DIR = "inputs2"
 HMR_DIR = "out_hmr2"
 OUTPUT_DIR = "out_fusion"
 DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Base-hf"
-DETAIL_STRENGTH = 0.6
-BLUR_SIGMA = 25
-SMOOTH_ITERS = 2
+
+# Conservative settings
+DETAIL_STRENGTH = 0.02       # was 0.6 -> now 0.02 (30x smaller)
+BLUR_SIGMA = 40              # was 25 -> stronger smoothing
+SMOOTH_ITERS = 3
+DETAIL_PCT_LOW = 5           # clip lowest 5%
+DETAIL_PCT_HIGH = 95         # clip highest 5%
+MAX_DISPLACEMENT = 0.02      # hard cap: 2% of mesh size
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -23,9 +28,7 @@ params_files = sorted(
     key=os.path.getmtime, reverse=True
 )
 if not params_files:
-    raise FileNotFoundError(
-        "No HMR2.0 params in " + HMR_DIR + "/ - run test_hmr2.yml first"
-    )
+    raise FileNotFoundError("No HMR2.0 params in " + HMR_DIR + "/ - run test_hmr2.yml first")
 params_path = params_files[0]
 print("[INFO] Using params: " + params_path)
 
@@ -36,8 +39,6 @@ bbox = data["detection_box"]
 img_h = int(data["image_h"])
 img_w = int(data["image_w"])
 print("[INFO] Mesh: " + str(len(vertices)) + " verts, " + str(len(faces)) + " faces")
-print("[INFO] Bbox: " + str(bbox.tolist()))
-print("[INFO] Image: " + str(img_w) + "x" + str(img_h))
 
 # Find original image
 IMAGE_EXTS = ("jpg","jpeg","jpge","png","bmp","webp","tif","tiff")
@@ -55,10 +56,7 @@ print("[INFO] Image: " + IMAGE_PATH)
 
 img_bgr = cv2.imread(IMAGE_PATH)
 if img_bgr is None:
-    img_bgr = cv2.cvtColor(
-        np.array(Image.open(IMAGE_PATH).convert("RGB")),
-        cv2.COLOR_RGB2BGR
-    )
+    img_bgr = cv2.cvtColor(np.array(Image.open(IMAGE_PATH).convert("RGB")), cv2.COLOR_RGB2BGR)
 img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
 # Stage 1: Depth Anything V2
@@ -84,27 +82,33 @@ cv2.imwrite(
 )
 print("[OK] Depth map saved")
 
-# Stage 2: Extract high-frequency detail
+# Stage 2: Extract high-frequency detail with outlier clipping
 print("[INFO] Stage 2: Extracting high-frequency detail...")
 d_blur = cv2.GaussianBlur(d, (0, 0), BLUR_SIGMA)
-detail = d - d_blur
-max_abs = np.abs(detail).max() + 1e-8
+detail_raw = d - d_blur
+
+# Clip outliers to percentile range
+lo = np.percentile(detail_raw, DETAIL_PCT_LOW)
+hi = np.percentile(detail_raw, DETAIL_PCT_HIGH)
+print("[INFO] Detail percentiles: lo=" + str(round(lo,4)) + ", hi=" + str(round(hi,4)))
+
+detail = np.clip(detail_raw, lo, hi)
+max_abs = max(abs(lo), abs(hi)) + 1e-8
 detail = detail / max_abs
-print("[INFO] Detail range: " + str(round(detail.min(),3)) + " -> " + str(round(detail.max(),3)))
+
+# Extra smoothing pass to kill pixel-level noise
+detail = cv2.GaussianBlur(detail, (0, 0), 3.0)
+
+print("[INFO] Detail range after clip: " + str(round(detail.min(),4)) + " -> " + str(round(detail.max(),4)))
 
 detail_vis = ((detail + 1.0) * 127.5).astype(np.uint8)
-cv2.imwrite(
-    os.path.join(OUTPUT_DIR, "fusion_detail_" + base_name + ".png"),
-    detail_vis
-)
+cv2.imwrite(os.path.join(OUTPUT_DIR, "fusion_detail_" + base_name + ".png"), detail_vis)
 
-# Stage 3: Load mesh (trimesh auto-computes normals as a property)
+# Stage 3: Load mesh
 print("[INFO] Stage 3: Loading HMR2.0 mesh...")
 mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
 mesh.merge_vertices()
 mesh.remove_unreferenced_vertices()
-
-# Ensure normals exist -- access the property (auto-computes if missing)
 _ = mesh.vertex_normals
 print("[INFO] Loaded mesh: " + str(len(mesh.vertices)) + " verts")
 
@@ -127,24 +131,31 @@ py = (by1 + ny * (by2 - by1)).astype(int)
 
 px = np.clip(px, 0, img_w - 1)
 py = np.clip(py, 0, img_h - 1)
-print("[INFO] Pixel range: x=[" + str(px.min()) + ", " + str(px.max()) + "], y=[" + str(py.min()) + ", " + str(py.max()) + "]")
 
 # Stage 5: Sample detail at each vertex
 print("[INFO] Stage 5: Sampling detail at vertices...")
 vertex_detail = detail[py, px]
 
-front_mask = normals[:, 2] > 0.1
+# Front-facing mask: normal Z > 0.3 (only strongly front-facing)
+front_mask = normals[:, 2] > 0.3
 print("[INFO] Front-facing vertices: " + str(front_mask.sum()) + " / " + str(len(verts)))
 
-# Stage 6: Displace vertices along normals
+# Stage 6: Compute displacement with hard clamp
 print("[INFO] Stage 6: Displacing vertices...")
-displacement = np.zeros_like(verts)
-displacement[front_mask] = (
-    normals[front_mask] *
-    (vertex_detail[front_mask, None] * DETAIL_STRENGTH)
-)
+# Scale: max displacement of one vertex = DETAIL_STRENGTH * detail value
+raw_disp = vertex_detail * DETAIL_STRENGTH
+# Clamp to ±MAX_DISPLACEMENT
+raw_disp = np.clip(raw_disp, -MAX_DISPLACEMENT, MAX_DISPLACEMENT)
+# Only apply to front-facing
+raw_disp = raw_disp * front_mask.astype(np.float32)
+
+displacement = normals * raw_disp[:, None]
 
 new_verts = verts + displacement
+
+print("[INFO] Displacement max magnitude: " + str(round(np.abs(raw_disp).max(), 5)))
+print("[INFO] Mesh size (z-range): " + str(round(verts[:,2].max() - verts[:,2].min(), 3)))
+
 mesh = trimesh.Trimesh(vertices=new_verts, faces=mesh.faces, process=False)
 
 # Stage 7: Repair mesh
@@ -159,9 +170,7 @@ print("[INFO] Watertight: " + str(mesh.is_watertight))
 print("[INFO] Winding consistent: " + str(mesh.is_winding_consistent))
 
 try:
-    trimesh.smoothing.filter_humphrey(
-        mesh, alpha=0.05, beta=0.3, iterations=SMOOTH_ITERS
-    )
+    trimesh.smoothing.filter_humphrey(mesh, alpha=0.05, beta=0.3, iterations=SMOOTH_ITERS)
     print("[OK] Humphrey smoothing applied")
 except Exception as e:
     print("[WARN] Smoothing skipped: " + str(e))
