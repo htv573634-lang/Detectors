@@ -1,1 +1,6 @@
-mediapipe opencv-python
+opencv-python-headless
+pillow
+trimesh
+transformers
+mediapipe==0.10.9
+sapiens-inference
