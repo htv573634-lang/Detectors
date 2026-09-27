@@ -6,12 +6,12 @@ import mediapipe as mp
 from PIL import Image
 from transformers import pipeline
 import trimesh
-import open3d as o3d
 
 # ── Config ────────────────────────────────────────────────────
-INPUT_DIR  = "inputs2"
-OUTPUT_DIR = "artifacts2"
+INPUT_DIR   = "inputs2"
+OUTPUT_DIR  = "artifacts2"
 DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Small-hf"
+Z_AMPLIFY   = 8.0     # how much to boost depth (3 = subtle, 8 = strong, 12 = extreme)
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -35,7 +35,7 @@ if img_bgr is None:
 img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 H, W = img_rgb.shape[:2]
 
-# ── Stage 1: MediaPipe Holistic → detect any body part ──────
+# ── Stage 1: Detect body part + build mask ───────────────────
 print("\n── STAGE 1: Detect body part ──")
 
 mp_holistic = mp.solutions.holistic
@@ -45,40 +45,44 @@ with mp_holistic.Holistic(
         min_detection_confidence=0.3) as holistic:
     result = holistic.process(img_rgb)
 
-def landmarks_to_bbox(landmarks, W, H, pad=25):
-    xs = [lm.x * W for lm in landmarks.landmark]
-    ys = [lm.y * H for lm in landmarks.landmark]
-    x0 = max(0, int(min(xs)) - pad)
-    y0 = max(0, int(min(ys)) - pad)
-    x1 = min(W, int(max(xs)) + pad)
-    y1 = min(H, int(max(ys)) + pad)
-    return (x0, y0, x1, y1)
+# Build a mask: white where the subject is, black elsewhere
+mask = np.zeros((H, W), dtype=np.uint8)
+labels = []
 
-detected = []
+def draw_landmarks_mask(landmarks, mask, W, H, thickness=25):
+    pts = np.array([[int(lm.x * W), int(lm.y * H)] for lm in landmarks.landmark])
+    if len(pts) >= 3:
+        hull = cv2.convexHull(pts)
+        cv2.fillConvexPoly(mask, hull, 255)
+        for p in pts:
+            cv2.circle(mask, tuple(p), thickness, 255, -1)
+
 if result.face_landmarks:
-    detected.append(("face", landmarks_to_bbox(result.face_landmarks, W, H)))
+    draw_landmarks_mask(result.face_landmarks, mask, W, H)
+    labels.append("face")
 if result.left_hand_landmarks:
-    detected.append(("left_hand", landmarks_to_bbox(result.left_hand_landmarks, W, H)))
+    draw_landmarks_mask(result.left_hand_landmarks, mask, W, H, thickness=30)
+    labels.append("left_hand")
 if result.right_hand_landmarks:
-    detected.append(("right_hand", landmarks_to_bbox(result.right_hand_landmarks, W, H)))
+    draw_landmarks_mask(result.right_hand_landmarks, mask, W, H, thickness=30)
+    labels.append("right_hand")
 if result.pose_landmarks:
-    detected.append(("body", landmarks_to_bbox(result.pose_landmarks, W, H, pad=15)))
+    draw_landmarks_mask(result.pose_landmarks, mask, W, H, thickness=25)
+    labels.append("body")
 
-if detected:
-    # Merge all detected regions into one bbox
-    x0 = min(b[0] for _, b in detected)
-    y0 = min(b[1] for _, b in detected)
-    x1 = max(b[2] for _, b in detected)
-    y1 = max(b[3] for _, b in detected)
-    labels = "+".join(l for l, _ in detected)
-    print(f"Detected: {labels}")
-    print(f"Merged bbox: ({x0},{y0}) → ({x1},{y1})")
+if not labels:
+    print("⚠️  No body part detected — using full image.")
+    mask[:] = 255
+    labels = ["full"]
 else:
-    print("⚠️  No body part detected — reconstructing full image.")
-    x0, y0, x1, y1 = 0, 0, W, H
-    labels = "full"
+    print(f"Detected: {'+'.join(labels)}")
 
-# ── Stage 2: Depth Anything → depth map ──────────────────────
+# Bounding box of the mask
+ys, xs = np.where(mask > 0)
+x0, y0, x1, y1 = xs.min(), ys.min(), xs.max()+1, ys.max()+1
+print(f"Subject bbox: ({x0},{y0}) → ({x1},{y1})")
+
+# ── Stage 2: Depth Anything ──────────────────────────────────
 print("\n── STAGE 2: Depth Anything ──")
 
 depth_pipe = pipeline("depth-estimation", model=DEPTH_MODEL, device="cpu")
@@ -90,58 +94,58 @@ if "predicted_depth" in out:
 else:
     raw = np.array(out["depth"]).astype(np.float32)
 
-# Crop to the detected body part (or full image if none)
-depth_crop = raw[y0:y1, x0:x1]
+# Crop to subject bbox
+raw_crop  = raw[y0:y1, x0:x1]
+mask_crop = mask[y0:y1, x0:x1]
 
-lo, hi = np.percentile(depth_crop, 2), np.percentile(depth_crop, 98)
-disp = np.clip((depth_crop - lo) / (hi - lo + 1e-8), 0, 1)
+# Normalize depth using only the subject pixels
+subject_vals = raw_crop[mask_crop > 0]
+lo, hi = np.percentile(subject_vals, 2), np.percentile(subject_vals, 98)
+disp = np.clip((raw_crop - lo) / (hi - lo + 1e-8), 0, 1)
 
-# Optional: mask out background using edge-aware threshold
-# Keeps only the region where depth varies (the subject stands out)
-grad = np.abs(np.gradient(disp)[0]) + np.abs(np.gradient(disp)[1])
-mask = grad > np.percentile(grad, 60)
-disp = disp * (0.6 + 0.4 * mask)   # attenuate flat regions
+# Outside the subject, set neutral depth so it doesn't create a flat plane
+disp[mask_crop == 0] = 0.5
 
-# ── Stage 3: Depth → point cloud → mesh ──────────────────────
-print("\n── STAGE 3: Reconstruct mesh ──")
+# ── Stage 3: Build 2.5D mesh by direct triangulation ─────────
+print("\n── STAGE 3: Reconstruct 2.5D mesh ──")
 
-z = 1.0 / (disp + 1e-3)
-z = (z - z.min()) / (z.max() - z.min() + 1e-8)
+h, w = disp.shape
+# Convert disparity (1=near) to z with amplified range
+z = (1.0 - disp) * Z_AMPLIFY
 
-h, w = z.shape
-cx, cy = w / 2.0, h / 2.0
+# Back-project to a regular grid
 us, vs = np.meshgrid(np.arange(w), np.arange(h))
-X = (us - cx) * z / w
-Y = (vs - cy) * z / w
+X = (us - w/2) / max(w, h)
+Y = (vs - h/2) / max(w, h)
 
-pts = np.stack([X.ravel(), Y.ravel(), z.ravel()], axis=-1)
+# Flatten and keep only valid mask pixels
+valid = mask_crop.flatten() > 0
+vertices_all = np.stack([X.ravel(), Y.ravel(), z.ravel()], axis=-1)
 
-pcd = o3d.geometry.PointCloud()
-pcd.points = o3d.utility.Vector3dVector(pts)
+index_map = -np.ones(h * w, dtype=np.int64)
+index_map[valid] = np.arange(valid.sum())
+vertices = vertices_all[valid]
 
-pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
-pcd.estimate_normals(
-    search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.02, max_nn=30)
-)
-pcd.orient_normals_towards_camera_location(np.array([0.0, 0.0, 0.0]))
+# Build faces (two triangles per grid cell where all 4 corners are valid)
+faces = []
+idx = np.arange(h * w).reshape(h, w)
+for i in range(h - 1):
+    for j in range(w - 1):
+        quad = [idx[i, j], idx[i, j+1], idx[i+1, j+1], idx[i+1, j]]
+        if all(index_map[q] >= 0 for q in quad):
+            a, b, c, d = [index_map[q] for q in quad]
+            faces.append([a, b, c])
+            faces.append([a, c, d])
 
-mesh_o3d, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-    pcd, depth=9, scale=1.1
-)
-mesh_o3d.remove_degenerate_triangles()
-mesh_o3d.remove_duplicated_vertices()
-mesh_o3d.remove_duplicated_triangles()
-mesh_o3d.compute_vertex_normals()
+faces = np.array(faces, dtype=np.int64)
+print(f"Mesh: {len(vertices)} vertices, {len(faces)} faces")
 
 # ── Stage 4: Export GLB ──────────────────────────────────────
 print("\n── STAGE 4: Export GLB ──")
 
-glb_path = os.path.join(OUTPUT_DIR, f"{labels}_{base_name}.glb")
-tri = trimesh.Trimesh(
-    vertices=np.asarray(mesh_o3d.vertices),
-    faces=np.asarray(mesh_o3d.triangles),
-    process=False,
-)
-tri.export(glb_path)
+mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+label_str = "+".join(labels)
+glb_path = os.path.join(OUTPUT_DIR, f"{label_str}_{base_name}.glb")
+mesh.export(glb_path)
 print(f"Saved: {glb_path}")
 print("DONE.")
