@@ -31,7 +31,6 @@ files = sorted(set(f for f in files if not os.path.basename(f).startswith(".")))
 if not files:
     raise FileNotFoundError(f"No image found in {INPUT_DIR}/")
 
-# Pick the most recently modified if multiple
 files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
 IMAGE_PATH = files[0]
 base_name  = os.path.splitext(os.path.basename(IMAGE_PATH))[0]
@@ -40,112 +39,150 @@ print(f"Base name  : {base_name}")
 if len(files) > 1:
     print(f"Note: {len(files)} images found, using the most recent.")
 
-img_bgr = cv2.imread(IMAGE_PATH)
-if img_bgr is None:
-    img_bgr = cv2.cvtColor(np.array(Image.open(IMAGE_PATH).convert("RGB")),
-                           cv2.COLOR_RGB2BGR)
-img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+# ── Load image (with alpha awareness) ────────────────────────
+img_pil = Image.open(IMAGE_PATH)
+has_alpha = img_pil.mode in ("RGBA", "LA") or (
+    img_pil.mode == "P" and "transparency" in img_pil.info
+)
+print(f"Image mode: {img_pil.mode}, has_alpha: {has_alpha}")
+
+img_pil_rgb = img_pil.convert("RGB")
+img_rgb = np.array(img_pil_rgb)
+img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 H, W = img_rgb.shape[:2]
 
-# ── Stage 1: Detect body part (Sapiens → MediaPipe fallback) ─
+# ── Stage 1: Detect body part ────────────────────────────────
 print("\n── STAGE 1: Detect body part ──")
 
 mask = np.zeros((H, W), dtype=np.uint8)
 labels = []
-sapiens_ok = False
+mask_source = "none"
 
-# ---- Try Sapiens ----
-try:
-    import torch
-    from sapiens_inference import (
-        SapiensPredictor, SapiensConfig, SapiensSegmentationType,
-    )
-    from sapiens_inference.normal import SapiensNormalType
-    from sapiens_inference.depth import SapiensDepthType
-
-    sapiens_config = SapiensConfig()
-    sapiens_config.device = torch.device("cpu")
-    sapiens_config.segmentation_type = SapiensSegmentationType.SEGMENTATION_03B
-    sapiens_config.depth_type  = SapiensDepthType.OFF
-    sapiens_config.normal_type = SapiensNormalType.OFF
-
-    predictor = SapiensPredictor(sapiens_config)
-    seg_result = predictor(img_rgb)
-
-    if isinstance(seg_result, dict):
-        seg_mask_ids = seg_result.get("segmentation",
-                        seg_result.get("mask",
-                        seg_result.get("seg_map")))
+# ---- Priority 1: Use existing alpha channel as mask ----
+if has_alpha:
+    alpha = np.array(img_pil.convert("RGBA"))[..., 3]
+    if alpha.min() < 200 and alpha.max() > 50:
+        mask = (alpha > 127).astype(np.uint8) * 255
+        mask_source = "alpha-channel"
+        print(f"Using embedded alpha channel as mask")
+        labels.append("subject")
     else:
-        seg_mask_ids = seg_result
+        print("Alpha channel is fully opaque — ignoring")
 
-    seg_mask_ids = np.asarray(seg_mask_ids).astype(np.uint8)
-    mask = (seg_mask_ids > 0).astype(np.uint8) * 255
+# ---- Priority 2: Sapiens (if no pre-mask) ----
+if mask_source == "none":
+    try:
+        import torch
+        from sapiens_inference import (
+            SapiensPredictor, SapiensConfig, SapiensSegmentationType,
+        )
+        from sapiens_inference.normal import SapiensNormalType
+        from sapiens_inference.depth import SapiensDepthType
 
-    unique_classes = np.unique(seg_mask_ids)
-    if 2 in unique_classes:  labels.append("face")
-    if 5 in unique_classes:  labels.append("left_hand")
-    if 14 in unique_classes: labels.append("right_hand")
-    if 1 in unique_classes or 21 in unique_classes or 22 in unique_classes:
-        labels.append("body")
-    if not labels:
-        labels = ["full"]
+        sapiens_config = SapiensConfig()
+        sapiens_config.device = torch.device("cpu")
+        sapiens_config.segmentation_type = SapiensSegmentationType.SEGMENTATION_03B
+        sapiens_config.depth_type  = SapiensDepthType.OFF
+        sapiens_config.normal_type = SapiensNormalType.OFF
 
-    print(f"Sapiens detected classes: {unique_classes}")
-    print(f"Sapiens detected parts: {'+'.join(labels)}")
-    sapiens_ok = True
+        predictor = SapiensPredictor(sapiens_config)
+        seg_result = predictor(img_rgb)
 
-except Exception as e:
-    print(f"Sapiens unavailable ({type(e).__name__}: {e})")
-    print("→ Falling back to MediaPipe Holistic.")
+        if isinstance(seg_result, dict):
+            seg_mask_ids = seg_result.get("segmentation",
+                            seg_result.get("mask",
+                            seg_result.get("seg_map")))
+        else:
+            seg_mask_ids = seg_result
 
-# ---- Fallback: MediaPipe ----
-if not sapiens_ok:
-    import mediapipe as mp
-    mp_holistic = mp.solutions.holistic
-    with mp_holistic.Holistic(
-            static_image_mode=True,
-            model_complexity=2,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5) as holistic:
-        result = holistic.process(img_rgb)
+        seg_mask_ids = np.asarray(seg_mask_ids).astype(np.uint8)
+        mask = (seg_mask_ids > 0).astype(np.uint8) * 255
+        mask_source = "sapiens"
 
-    def draw_mask(lms, mask, W, H, thickness):
-        pts = np.array([[int(lm.x * W), int(lm.y * H)] for lm in lms.landmark])
-        if len(pts) >= 3:
-            cv2.fillConvexPoly(mask, cv2.convexHull(pts), 255)
-            for p in pts:
-                cv2.circle(mask, tuple(p), thickness, 255, -1)
+        uc = np.unique(seg_mask_ids)
+        if 2 in uc:  labels.append("face")
+        if 5 in uc:  labels.append("left_hand")
+        if 14 in uc: labels.append("right_hand")
+        if 1 in uc or 21 in uc or 22 in uc: labels.append("body")
+        if not labels: labels = ["full"]
 
-    if result.face_landmarks:
-        draw_mask(result.face_landmarks, mask, W, H, 10); labels.append("face")
-    if result.left_hand_landmarks:
-        draw_mask(result.left_hand_landmarks, mask, W, H, 20); labels.append("left_hand")
-    if result.right_hand_landmarks:
-        draw_mask(result.right_hand_landmarks, mask, W, H, 20); labels.append("right_hand")
-    if result.pose_landmarks:
-        draw_mask(result.pose_landmarks, mask, W, H, 40); labels.append("body")
+        print(f"Sapiens classes: {uc}")
+        print(f"Sapiens parts: {'+'.join(labels)}")
 
-    if not labels:
-        print("⚠️  No body part detected — using full image.")
-        mask[:] = 255
-        labels = ["full"]
-    else:
-        print(f"MediaPipe detected: {'+'.join(labels)}")
+    except Exception as e:
+        print(f"Sapiens unavailable ({type(e).__name__}: {e})")
+        print("→ Trying rembg fallback.")
 
-# ── Mask cleanup: keep largest component, smooth edges ───────
+# ---- Priority 3: rembg fallback ----
+if mask_source == "none":
+    try:
+        from rembg import remove, new_session
+        session = new_session("u2netp")
+        rgba = remove(img_pil_rgb, session=session)
+        alpha = np.array(rgba)[..., 3]
+        mask = (alpha > 127).astype(np.uint8) * 255
+        mask_source = "rembg"
+        print("rembg mask generated")
+        labels.append("subject")
+    except Exception as e:
+        print(f"rembg unavailable ({e})")
+        print("→ Falling back to MediaPipe Holistic.")
+
+# ---- Priority 4: MediaPipe (last resort) ----
+if mask_source == "none":
+    try:
+        import mediapipe as mp
+        with mp.solutions.holistic.Holistic(
+                static_image_mode=True, model_complexity=2,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5) as holistic:
+            result = holistic.process(img_rgb)
+
+        def draw_mask(lms, mask, W, H, thickness):
+            pts = np.array([[int(lm.x * W), int(lm.y * H)] for lm in lms.landmark])
+            if len(pts) >= 3:
+                cv2.fillConvexPoly(mask, cv2.convexHull(pts), 255)
+                for p in pts:
+                    cv2.circle(mask, tuple(p), thickness, 255, -1)
+
+        if result.face_landmarks:
+            draw_mask(result.face_landmarks, mask, W, H, 10); labels.append("face")
+        if result.left_hand_landmarks:
+            draw_mask(result.left_hand_landmarks, mask, W, H, 20); labels.append("left_hand")
+        if result.right_hand_landmarks:
+            draw_mask(result.right_hand_landmarks, mask, W, H, 20); labels.append("right_hand")
+        if result.pose_landmarks:
+            draw_mask(result.pose_landmarks, mask, W, H, 40); labels.append("body")
+
+        if not labels:
+            mask[:] = 255; labels = ["full"]
+        mask_source = "mediapipe"
+        print(f"MediaPipe parts: {'+'.join(labels)}")
+    except Exception as e:
+        print(f"MediaPipe unavailable ({e})")
+        mask[:] = 255; labels = ["full"]; mask_source = "full-image"
+
+print(f"Mask source: {mask_source}")
+
+# ── Mask cleanup: solidify + keep largest component ──────────
+kernel = np.ones((5, 5), np.uint8)
+mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+mask = cv2.dilate(mask, kernel, iterations=1)
+
 num_labels, lab_imgs, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
 if num_labels > 1:
     largest = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
     mask = ((lab_imgs == largest).astype(np.uint8)) * 255
 
+# Smooth edges
 mask = cv2.GaussianBlur(mask, (5, 5), 0)
 mask = (mask > 127).astype(np.uint8) * 255
 
 ys, xs = np.where(mask > 0)
 if len(xs) == 0:
-    raise RuntimeError("Mask is empty — nothing detected")
+    raise RuntimeError("Mask is empty")
 x0, y0, x1, y1 = xs.min(), ys.min(), xs.max()+1, ys.max()+1
+
 print(f"Mask coverage: {100*mask.mean()/255:.1f}% of image")
 print(f"Subject bbox: ({x0},{y0}) → ({x1},{y1})")
 print(f"Mask coverage in bbox: {100*mask[y0:y1, x0:x1].mean()/255:.1f}%")
@@ -153,10 +190,10 @@ print(f"Mask coverage in bbox: {100*mask[y0:y1, x0:x1].mean()/255:.1f}%")
 cv2.imwrite(os.path.join(OUTPUT_DIR, f"mask_{base_name}.png"), mask)
 
 # ── Stage 2: Depth Anything ──────────────────────────────────
-print("\n── STAGE 2: Depth Anything (Base) ──")
+print("\n── STAGE 2: Depth Anything ──")
 
 depth_pipe = pipeline("depth-estimation", model=DEPTH_MODEL, device="cpu")
-out = depth_pipe(Image.fromarray(img_rgb))
+out = depth_pipe(img_pil_rgb)
 if isinstance(out, list): out = out[0]
 
 if "predicted_depth" in out:
@@ -171,6 +208,9 @@ raw_crop  = raw[y0:y1, x0:x1]
 mask_crop = mask[y0:y1, x0:x1]
 rgb_crop  = img_rgb[y0:y1, x0:x1].copy()
 
+# Paint background white so it doesn't bleed into texture
+rgb_crop[mask_crop == 0] = 255
+
 subject_vals = raw_crop[mask_crop > 0]
 if len(subject_vals) < 10:
     subject_vals = raw_crop.flatten()
@@ -179,7 +219,7 @@ disp = np.clip((raw_crop - lo) / (hi - lo + 1e-8), 0, 1)
 print(f"Depth range: {disp.min():.3f} → {disp.max():.3f}, std={disp.std():.3f}")
 
 # ── Stage 3: Downscale ───────────────────────────────────────
-print("\n── STAGE 3: Reconstruct mesh (masked) ──")
+print("\n── STAGE 3: Reconstruct mesh ──")
 
 h, w = disp.shape
 scale = min(1.0, MAX_SIDE / max(h, w))
@@ -241,7 +281,6 @@ if MIRROR_MODE:
         np.stack([a + off, d + off, c + off], axis=1),
     ])
 
-    # Edge seam follows mask contour
     contours, _ = cv2.findContours(mask_dil, cv2.RETR_EXTERNAL,
                                    cv2.CHAIN_APPROX_NONE)
     edges = []
@@ -266,7 +305,7 @@ else:
 print(f"Mesh: {len(vertices)} vertices, {len(faces)} faces")
 
 # ── Stage 4: Textured GLB ────────────────────────────────────
-print("\n── STAGE 4: Export textured GLB ──")
+print("\n── STAGE 4: Export GLB ──")
 
 mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
 mesh.remove_unreferenced_vertices()
