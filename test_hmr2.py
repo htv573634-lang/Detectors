@@ -1,9 +1,23 @@
 import os
 import glob
+import sys
 import numpy as np
 import cv2
 import torch
 from PIL import Image
+from unittest.mock import MagicMock
+
+# ── Stub pyrender + OpenGL BEFORE importing 4D-Humans ────────
+# (we don't render anything — we only export meshes)
+sys.modules["pyrender"] = MagicMock()
+sys.modules["pyrender.light"] = MagicMock()
+sys.modules["pyrender.material"] = MagicMock()
+sys.modules["pyrender.mesh"] = MagicMock()
+sys.modules["pyrender.node"] = MagicMock()
+sys.modules["pyrender.scene"] = MagicMock()
+sys.modules["pyrender.viewer"] = MagicMock()
+sys.modules["OpenGL"] = MagicMock()
+sys.modules["OpenGL.GL"] = MagicMock()
 
 INPUT_DIR  = "inputs2"
 OUTPUT_DIR = "out_hmr2"
@@ -28,8 +42,7 @@ if img_cv2 is None:
 img_rgb = cv2.cvtColor(img_cv2, cv2.COLOR_BGR2RGB)
 H, W = img_rgb.shape[:2]
 
-# ── Import HMR2.0 modules ─────────────────────────────────────
-import sys
+# ── Import HMR2.0 ────────────────────────────────────────────
 sys.path.insert(0, "4D-Humans")
 
 from hmr2.configs import get_config
@@ -43,8 +56,8 @@ from detectron2.config import LazyConfig
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 print(f"Using device: {device}")
 
-DEFAULT_CHECKPOINT = "logs/train/multiruns/hmr2/0/checkpoints/epoch=35-step=1000000.ckpt"
-model_cfg_path = os.path.join(os.path.dirname(DEFAULT_CHECKPOINT), "..", "model_config.yaml")
+DEFAULT_CHECKPOINT = "4D-Humans/logs/train/multiruns/hmr2/0/checkpoints/epoch=35-step=1000000.ckpt"
+model_cfg_path = "4D-Humans/logs/train/multiruns/hmr2/0/model_config.yaml"
 model_cfg = get_config(model_cfg_path)
 
 model = HMR2.load_from_checkpoint(DEFAULT_CHECKPOINT, strict=False, cfg=model_cfg).to(device)
