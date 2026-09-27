@@ -54,23 +54,35 @@ jobs:
       - name: Download SMPL neutral model
         run: |
           mkdir -p 4D-Humans/data
-          wget -q -O basicModel_neutral_lbs_10_207_0_v1.0.0.pkl \
+          wget -q -O /tmp/smpl.pkl \
             "https://github.com/classner/up/raw/master/models/3D/basicModel_neutral_lbs_10_207_0_v1.0.0.pkl" \
-            || echo "SMPL download failed — provide manually"
-          if [ -f basicModel_neutral_lbs_10_207_0_v1.0.0.pkl ]; then
-            mv basicModel_neutral_lbs_10_207_0_v1.0.0.pkl 4D-Humans/data/SMPL_NEUTRAL.pkl
+            && mv /tmp/smpl.pkl 4D-Humans/data/SMPL_NEUTRAL.pkl \
+            && echo "SMPL downloaded: $(ls -lh 4D-Humans/data/SMPL_NEUTRAL.pkl)"
+          if [ ! -f 4D-Humans/data/SMPL_NEUTRAL.pkl ]; then
+            echo "⚠️  SMPL download failed — place file manually"
           fi
-          ls -lh 4D-Humans/data/ || true
 
       - name: Download HMR2.0 checkpoint
         run: |
           mkdir -p 4D-Humans/logs/train/multiruns/hmr2/0/checkpoints/
-          wget -q -O 4D-Humans/logs/train/multiruns/hmr2/0/checkpoints/epoch=35-step=1000000.ckpt \
-            "https://huggingface.co/brjathu/HMR2.0/resolve/main/logs/train/multiruns/hmr2/0/checkpoints/epoch=35-step=1000000.ckpt" \
-            || echo "Checkpoint download failed"
-          wget -q -O 4D-Humans/logs/train/multiruns/hmr2/0/model_config.yaml \
-            "https://huggingface.co/brjathu/HMR2.0/resolve/main/logs/train/multiruns/hmr2/0/model_config.yaml" \
-            || echo "Config download failed"
+          cd 4D-Humans/logs/train/multiruns/hmr2/0
+
+          wget -q --show-progress -O model_config.yaml \
+            "https://huggingface.co/spaces/brjathu/HMR2.0/resolve/main/logs/train/multiruns/hmr2/0/model_config.yaml"
+
+          wget -q --show-progress -O checkpoints/epoch=35-step=1000000.ckpt \
+            "https://huggingface.co/spaces/brjathu/HMR2.0/resolve/main/logs/train/multiruns/hmr2/0/checkpoints/epoch%3D35-step%3D1000000.ckpt"
+
+          echo "=== Downloaded files ==="
+          ls -lh model_config.yaml
+          ls -lh checkpoints/
+
+          SIZE=$(stat -c%s checkpoints/epoch=35-step=1000000.ckpt)
+          echo "Checkpoint size: $SIZE bytes"
+          if [ "$SIZE" -lt 100000000 ]; then
+            echo "❌ Checkpoint too small — download failed"
+            exit 1
+          fi
 
       - name: Run test
         run: python -u test_hmr2.py
