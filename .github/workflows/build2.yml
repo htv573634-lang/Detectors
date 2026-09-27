@@ -1,4 +1,4 @@
-name: Run 3D Human Fusion
+name: Run 3D Body-Part Reconstruction
 
 on:
   push:
@@ -31,30 +31,12 @@ jobs:
 
       - name: Python deps
         run: |
-          pip install --upgrade pip setuptools wheel
-          pip install --upgrade numpy cython lap
-          pip install opencv-python-headless pillow trimesh
+          pip install opencv-python-headless pillow trimesh open3d
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          pip install transformers onnxruntime
-          pip install --no-build-isolation simple-romp
-          pip install nosmpl
+          pip install transformers
+          pip install "mediapipe==0.10.9"
 
-      # ↓↓↓ THIS IS THE NEW STEP THAT FIXES THE ERROR ↓↓↓
-      - name: Download ROMP ONNX model
-        run: |
-          mkdir -p $HOME/.romp
-          wget -q -O $HOME/.romp/ROMP.onnx \
-            "https://github.com/Arthur151/ROMP/releases/download/V2.0/ROMP.onnx"
-          ls -lh $HOME/.romp/ROMP.onnx
-      # ↑↑↑ END OF NEW STEP ↑↑↑
-
-      - name: Download NoSMPL ONNX model
-        run: |
-          mkdir -p models
-          wget -q -O models/smpl.onnx \
-            "https://github.com/jinfagang/nosmpl/releases/download/v1.1/smpl.onnx"
-
-      - name: Run fusion
+      - name: Run reconstruction
         run: python run2.py
 
       - name: Sync with remote
@@ -66,12 +48,12 @@ jobs:
       - name: Commit GLB
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Auto-saved fused GLB"
+          commit_message: "Auto-saved body-part GLB"
           file_pattern: "artifacts2/*.glb"
           branch: main
           push_options: '--force-with-lease'
 
       - uses: actions/upload-artifact@v4
         with:
-          name: human-mesh
+          name: body-part-mesh
           path: artifacts2/*.glb
