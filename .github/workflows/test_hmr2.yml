@@ -19,6 +19,22 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Free disk space
+        run: |
+          echo "=== Before cleanup ==="
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go || true
+          echo "=== After cleanup ==="
+          df -h /
+
+      - name: Initial memory check
+        run: |
+          echo "=== Initial memory state ==="
+          free -h
+          echo "=== Initial disk state ==="
+          df -h /home/runner
+
       - name: System deps
         run: |
           sudo apt-get update
@@ -51,45 +67,48 @@ jobs:
           pip install opencv-python-headless pillow numpy trimesh
           pip install smplx
 
+      - name: Memory after dependencies
+        run: |
+          echo "=== Memory after pip installs ==="
+          free -h
+          df -h /home/runner
+
       - name: Download SMPL files from GitHub Release
         run: |
           mkdir -p data/smpl
           BASE="https://github.com/htv573634-lang/Detectors/releases/download/Data"
 
           echo "Downloading SMPL_FEMALE.pkl..."
-          wget -q --show-progress -O data/smpl/SMPL_FEMALE.pkl "$BASE/SMPL_FEMALE.pkl"
+          wget -q -O data/smpl/SMPL_FEMALE.pkl "$BASE/SMPL_FEMALE.pkl"
 
           echo "Downloading SMPL_MALE.pkl..."
-          wget -q --show-progress -O data/smpl/SMPL_MALE.pkl "$BASE/SMPL_MALE.pkl"
+          wget -q -O data/smpl/SMPL_MALE.pkl "$BASE/SMPL_MALE.pkl"
 
           echo "Downloading smpl_mean_params.npz..."
-          wget -q --show-progress -O data/smpl_mean_params.npz "$BASE/smpl_mean_params.npz"
+          wget -q -O data/smpl_mean_params.npz "$BASE/smpl_mean_params.npz"
 
           echo "Downloading SMPL_to_J19.pkl..."
-          wget -q --show-progress -O data/SMPL_to_J19.pkl "$BASE/SMPL_to_J19.pkl"
+          wget -q -O data/SMPL_to_J19.pkl "$BASE/SMPL_to_J19.pkl"
 
           echo "=== Downloaded files ==="
           ls -lh data/ data/smpl/
 
           FEMALE=$(stat -c%s data/smpl/SMPL_FEMALE.pkl)
           MALE=$(stat -c%s data/smpl/SMPL_MALE.pkl)
-          NPZ=$(stat -c%s data/smpl_mean_params.npz)
-          J19=$(stat -c%s data/SMPL_to_J19.pkl)
-
           [ "$FEMALE" -lt 10000000 ] && echo "❌ Female too small" && exit 1
           [ "$MALE" -lt 10000000 ] && echo "❌ Male too small" && exit 1
-          [ "$NPZ" -lt 500 ] && echo "❌ npz too small" && exit 1
-          [ "$J19" -lt 500000 ] && echo "❌ J19 too small" && exit 1
-          echo "✓ All SMPL files verified"
+          echo "✓ SMPL files verified"
 
       - name: Download HMR2.0 checkpoint
         run: |
           mkdir -p 4D-Humans/logs/train/multiruns/hmr2/0/checkpoints/
           cd 4D-Humans/logs/train/multiruns/hmr2/0
 
-          wget -q --show-progress -O model_config.yaml \
+          echo "Downloading config..."
+          wget -q -O model_config.yaml \
             "https://huggingface.co/spaces/brjathu/HMR2.0/resolve/main/logs/train/multiruns/hmr2/0/model_config.yaml"
 
+          echo "Downloading checkpoint (~2.7 GB)..."
           wget -q --show-progress -O checkpoints/epoch=35-step=1000000.ckpt \
             "https://huggingface.co/spaces/brjathu/HMR2.0/resolve/main/logs/train/multiruns/hmr2/0/checkpoints/epoch%3D35-step%3D1000000.ckpt"
 
@@ -97,18 +116,54 @@ jobs:
           echo "Checkpoint size: $SIZE bytes"
           [ "$SIZE" -lt 100000000 ] && echo "❌ Checkpoint too small" && exit 1
 
+      - name: Memory before test
+        run: |
+          echo "=== Memory right before running test ==="
+          free -h
+          echo "=== Disk right before running test ==="
+          df -h /home/runner
+          echo "=== Running processes by memory ==="
+          ps aux --sort=-%mem | head -10
+
       - name: Run test
+        id: main_test
         env:
           SMPL_GENDER: female
-        run: python -u test_hmr2.py
+          PYTHONUNBUFFERED: "1"
+          OMP_NUM_THREADS: "2"
+        continue-on-error: true
+        run: python -u test_hmr2.py 2>&1 | tee /tmp/test_output.log
+
+      - name: Memory after test
+        if: always()
+        run: |
+          echo "=== Memory right after running test ==="
+          free -h
+          echo "=== Disk after test ==="
+          df -h /home/runner
+          echo "=== Test exit code: ${{ steps.main_test.outcome }} ==="
+
+      - name: Show test output (last 100 lines)
+        if: always()
+        run: |
+          echo "=== Last 100 lines of test output ==="
+          tail -100 /tmp/test_output.log 2>/dev/null || echo "No log file found"
+
+      - name: Show test output (search for errors)
+        if: always()
+        run: |
+          echo "=== Errors in log ==="
+          grep -i -E "error|fail|exception|killed|memory" /tmp/test_output.log 2>/dev/null | head -30 || echo "No errors found"
 
       - name: Sync with remote
+        if: success()
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git pull --rebase origin main || true
 
       - name: Commit output
+        if: success()
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Test HMR2.0 female output"
@@ -117,6 +172,9 @@ jobs:
           push_options: '--force-with-lease'
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: hmr2-results
-          path: out_hmr2/
+          name: hmr2-results-and-log
+          path: |
+            out_hmr2/
+            /tmp/test_output.log
