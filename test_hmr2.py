@@ -147,10 +147,18 @@ model.eval()
 print("[OK] HMR2.0 loaded")
 
 print("[INFO] Loading ViTDet detector...")
-detectron2_cfg = LazyConfig.load(
-    "4D-Humans/vendor/detectron2/projects/ViTDet/configs/COCO/"
-    "cascade_mask_rcnn_vitdet_h_75ep.py"
-)
+# FIX: ViTDet config lives in detectron2-src, NOT in 4D-Humans/vendor/
+VITDET_CFG_PATH = "detectron2-src/projects/ViTDet/configs/COCO/cascade_mask_rcnn_vitdet_h_75ep.py"
+
+if not os.path.exists(VITDET_CFG_PATH):
+    raise FileNotFoundError(
+        f"ViTDet config not found at {VITDET_CFG_PATH}. "
+        "Make sure the workflow clones detectron2 to detectron2-src/"
+    )
+
+print(f"[OK] ViTDet config found: {VITDET_CFG_PATH}")
+
+detectron2_cfg = LazyConfig.load(VITDET_CFG_PATH)
 detectron2_cfg.train.init_checkpoint = (
     "https://dl.fbaipublicfiles.com/detectron2/ViTDet/COCO/"
     "cascade_mask_rcnn_vitdet_h/f328730692/model_final_f05665.pkl"
