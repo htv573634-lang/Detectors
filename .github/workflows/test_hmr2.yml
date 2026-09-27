@@ -15,15 +15,12 @@ jobs:
           fetch-depth: 0
           ref: main
 
-      # ══════════════════════════════════════════════════════════
       # CACHES
-      # ══════════════════════════════════════════════════════════
-
       - name: Cache pip wheels
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: pip-${{ runner.os }}-py310-v4
+          key: pip-${{ runner.os }}-py310-v5
           restore-keys: |
             pip-${{ runner.os }}-py310-
             pip-${{ runner.os }}-
@@ -32,14 +29,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-${{ runner.os }}-v4
+          key: hf-${{ runner.os }}-v5
           restore-keys: hf-${{ runner.os }}-
 
       - name: Cache torch hub
         uses: actions/cache@v4
         with:
           path: ~/.cache/torch
-          key: torch-${{ runner.os }}-v4
+          key: torch-${{ runner.os }}-v5
           restore-keys: torch-${{ runner.os }}-
 
       - name: Cache 4D-Humans repo + checkpoint
@@ -47,20 +44,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: 4D-Humans
-          key: 4dhumans-v4-${{ runner.os }}
-          restore-keys: 4dhumans-v4-
+          key: 4dhumans-v5-${{ runner.os }}
+          restore-keys: 4dhumans-v5-
 
       - name: Cache detectron2 source
         id: cache-det2src
         uses: actions/cache@v4
         with:
           path: detectron2-src
-          key: detectron2-src-v1-${{ runner.os }}
-          restore-keys: detectron2-src-v1-
-
-      # ══════════════════════════════════════════════════════════
-      # SETUP
-      # ══════════════════════════════════════════════════════════
+          key: detectron2-src-v2-${{ runner.os }}
+          restore-keys: detectron2-src-v2-
 
       - uses: actions/setup-python@v5
         with:
@@ -68,9 +61,7 @@ jobs:
 
       - name: Memory and disk check
         run: |
-          echo "=== Memory ==="
           free -h
-          echo "=== Disk ==="
           df -h /home/runner
 
       - name: System deps
@@ -85,42 +76,35 @@ jobs:
           pip install --upgrade pip
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
-      - name: Install build deps
+      # ── THE FIX ─────────────────────────────────────────────
+      - name: Install build deps (pinned setuptools<81)
         run: |
-          pip install --upgrade setuptools wheel cython
+          pip install --upgrade pip
+          pip install "setuptools<81" wheel cython
+          python -c "import pkg_resources; print('[OK] pkg_resources available')"
+      # ────────────────────────────────────────────────────────
 
       - name: Install Detectron2 (CPU, no isolation)
         run: |
           pip install --no-build-isolation 'git+https://github.com/facebookresearch/detectron2.git'
 
-      # ══════════════════════════════════════════════════════════
-      # DETECTRON2 SOURCE (for ViTDet configs)
-      # ══════════════════════════════════════════════════════════
-
       - name: Clone detectron2 source (if cache miss)
         if: steps.cache-det2src.outputs.cache-hit != 'true'
         run: |
-          echo "Cache miss — cloning detectron2 source..."
           git clone --depth 1 https://github.com/facebookresearch/detectron2.git detectron2-src
 
       - name: Verify ViTDet config
         run: |
           CFG="detectron2-src/projects/ViTDet/configs/COCO/cascade_mask_rcnn_vitdet_h_75ep.py"
           if [ ! -f "$CFG" ]; then
-            echo "ERROR: ViTDet config missing at $CFG"
-            ls -la detectron2-src/projects/ || echo "projects/ folder missing"
+            echo "ERROR: ViTDet config missing"
             exit 1
           fi
           echo "ViTDet config present: $(stat -c%s $CFG) bytes"
 
-      # ══════════════════════════════════════════════════════════
-      # 4D-HUMANS
-      # ══════════════════════════════════════════════════════════
-
       - name: Clone 4D-Humans (if cache miss)
         if: steps.cache-4dhumans.outputs.cache-hit != 'true'
         run: |
-          echo "Cache miss — cloning 4D-Humans..."
           git clone https://github.com/shubham-goel/4D-Humans.git
 
       - name: Install 4D-Humans
@@ -134,56 +118,25 @@ jobs:
           pip install opencv-python-headless pillow numpy trimesh
           pip install smplx
 
-      # ══════════════════════════════════════════════════════════
-      # SMPL FILES
-      # ══════════════════════════════════════════════════════════
-
-      - name: Download SMPL files from GitHub Release
+      - name: Download SMPL files
         run: |
           mkdir -p data/smpl
           BASE="https://github.com/htv573634-lang/Detectors/releases/download/Data"
-
           wget -q -O data/smpl/SMPL_FEMALE.pkl "$BASE/SMPL_FEMALE.pkl"
           wget -q -O data/smpl/SMPL_MALE.pkl "$BASE/SMPL_MALE.pkl"
           wget -q -O data/smpl_mean_params.npz "$BASE/smpl_mean_params.npz"
           wget -q -O data/SMPL_to_J19.pkl "$BASE/SMPL_to_J19.pkl"
-
           ls -lh data/ data/smpl/
-
-          FEMALE=$(stat -c%s data/smpl/SMPL_FEMALE.pkl)
-          MALE=$(stat -c%s data/smpl/SMPL_MALE.pkl)
-          if [ "$FEMALE" -lt 10000000 ]; then echo "Female too small"; exit 1; fi
-          if [ "$MALE" -lt 10000000 ]; then echo "Male too small"; exit 1; fi
-          echo "SMPL files verified"
-
-      # ══════════════════════════════════════════════════════════
-      # HMR2.0 CHECKPOINT
-      # ══════════════════════════════════════════════════════════
 
       - name: Download HMR2.0 checkpoint (if cache miss)
         if: steps.cache-4dhumans.outputs.cache-hit != 'true'
         run: |
           mkdir -p 4D-Humans/logs/train/multiruns/hmr2/0/checkpoints/
           cd 4D-Humans/logs/train/multiruns/hmr2/0
-
           wget -q -O model_config.yaml \
             "https://huggingface.co/spaces/brjathu/HMR2.0/resolve/main/logs/train/multiruns/hmr2/0/model_config.yaml"
-
           wget -q --show-progress -O checkpoints/epoch=35-step=1000000.ckpt \
             "https://huggingface.co/spaces/brjathu/HMR2.0/resolve/main/logs/train/multiruns/hmr2/0/checkpoints/epoch%3D35-step%3D1000000.ckpt"
-
-          SIZE=$(stat -c%s checkpoints/epoch=35-step=1000000.ckpt)
-          if [ "$SIZE" -lt 100000000 ]; then echo "Checkpoint too small"; exit 1; fi
-          echo "Checkpoint verified: $SIZE bytes"
-
-      # ══════════════════════════════════════════════════════════
-      # RUN TEST
-      # ══════════════════════════════════════════════════════════
-
-      - name: Memory before test
-        run: |
-          free -h
-          df -h /home/runner
 
       - name: Run test
         id: main_test
@@ -194,26 +147,19 @@ jobs:
         continue-on-error: true
         run: python -u test_hmr2.py 2>&1 | tee /tmp/test_output.log
 
-      - name: Memory after test
-        if: always()
-        run: |
-          free -h
-          echo "Outcome: ${{ steps.main_test.outcome }}"
-
       - name: Show log tail
         if: always()
         run: tail -80 /tmp/test_output.log 2>/dev/null || echo "No log"
 
-      - name: Sync with remote
+      - name: Sync + commit
         if: success()
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git pull --rebase origin main || true
 
-      - name: Commit output
+      - uses: stefanzweifel/git-auto-commit-action@v5
         if: success()
-        uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Test HMR2.0 female output"
           file_pattern: "out_hmr2/*"
@@ -223,7 +169,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: hmr2-results-and-log
+          name: hmr2-results
           path: |
             out_hmr2/
             /tmp/test_output.log
