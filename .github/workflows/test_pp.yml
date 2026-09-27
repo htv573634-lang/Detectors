@@ -1,1 +1,71 @@
-.
+name: Test PP-HumanSegV1-Lite
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install opencv-python-headless pillow numpy
+          pip install paddlepaddle==2.6.1
+          pip install paddle2onnx onnxruntime
+
+      - name: Download PP-HumanSegV1-Lite model
+        run: |
+          wget -q -O pp.tar.gz "https://paddleseg.bj.bcebos.com/dygraph/ppseg/ppseg_lite_portrait_398x224.tar.gz"
+          tar -xzf pp.tar.gz
+          find . -name "*.pdmodel" -o -name "*.pdiparams" | head
+
+      - name: Convert to ONNX
+        run: |
+          PD_MODEL=$(find . -name "*.pdmodel" | head -1)
+          PD_PARAMS=$(find . -name "*.pdiparams" | head -1)
+          echo "Model: $PD_MODEL"
+          echo "Params: $PD_PARAMS"
+          MODEL_DIR=$(dirname "$PD_MODEL")
+          cd "$MODEL_DIR"
+          paddle2onnx \
+            --model_dir . \
+            --model_filename $(basename "$PD_MODEL") \
+            --params_filename $(basename "$PD_PARAMS") \
+            --save_file "$GITHUB_WORKSPACE/pphumanseg_lite.onnx" \
+            --opset_version 12
+          ls -lh $GITHUB_WORKSPACE/pphumanseg_lite.onnx
+
+      - name: Run test
+        run: python -u test_pp.py
+
+      - name: Sync with remote
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main || true
+
+      - name: Commit output
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Test PP-HumanSeg output"
+          file_pattern: "out_pp/*"
+          branch: main
+          push_options: '--force-with-lease'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pp-results
+          path: out_pp/
