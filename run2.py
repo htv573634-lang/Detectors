@@ -11,13 +11,15 @@ import trimesh
 INPUT_DIR        = "inputs2"
 OUTPUT_DIR       = "artifacts2"
 DEPTH_MODEL      = "depth-anything/Depth-Anything-V2-Base-hf"
-Z_AMPLIFY        = 4.0          # raised for stronger curves
-BACK_THICKNESS   = 1.5
+Z_AMPLIFY        = 2.0          # lower during testing — exposes geometry bugs
+BACK_THICKNESS   = 1.0
 MAX_SIDE         = 700
 MIRROR_MODE      = True
-SMOOTH_ITERS     = 8            # Laplacian smoothing iterations
+SMOOTH_ITERS     = 4
+MEDIAN_KSIZE     = 5            # median blur for spike removal
+MAX_GRAD         = 0.05         # max depth difference between adjacent pixels
 
-# ── Cleanup artifacts2/ (keep .gitkeep) ──────────────────────
+# ── Cleanup artifacts2/ ──────────────────────────────────────
 if os.path.isdir(OUTPUT_DIR):
     for f in os.listdir(OUTPUT_DIR):
         if f == ".gitkeep":
@@ -216,24 +218,29 @@ mask_crop = mask[y0:y1, x0:x1]
 rgb_crop  = img_rgb[y0:y1, x0:x1].copy()
 rgb_crop[mask_crop == 0] = 255
 
-# Normalize subject depth to 0..1
 subject_vals = raw_crop[mask_crop > 0]
 if len(subject_vals) < 10:
     subject_vals = raw_crop.flatten()
 lo, hi = np.percentile(subject_vals, 2), np.percentile(subject_vals, 98)
 disp = np.clip((raw_crop - lo) / (hi - lo + 1e-8), 0, 1).astype(np.float32)
 
-# ── FIX 1: Bilateral filter (removes striping, keeps edges) ─
-disp = cv2.bilateralFilter(disp, d=9, sigmaColor=0.15, sigmaSpace=15)
-
-# ── FIX 2: CLAHE local contrast enhancement ──────────────────
+# ── FIX 1: Median blur removes isolated peaks ────────────────
 disp_u8 = (disp * 255).astype(np.uint8)
-clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-disp_u8 = clahe.apply(disp_u8)
+disp_u8 = cv2.medianBlur(disp_u8, MEDIAN_KSIZE)
 disp = disp_u8.astype(np.float32) / 255.0
 
-# Second bilateral pass to seal in the enhanced curves
-disp = cv2.bilateralFilter(disp, d=7, sigmaColor=0.10, sigmaSpace=10)
+# ── FIX 2: Gradient clip — no adjacent pixels jump in depth ──
+for _ in range(2):
+    dr = np.zeros_like(disp); dr[:, :-1] = disp[:, 1:] - disp[:, :-1]
+    dd = np.zeros_like(disp); dd[:-1, :] = disp[1:, :] - disp[:-1, :]
+    dr = np.clip(dr, -MAX_GRAD, MAX_GRAD)
+    dd = np.clip(dd, -MAX_GRAD, MAX_GRAD)
+    disp[:, :-1] += 0.5 * dr[:, :-1]
+    disp[1:, :]  += 0.5 * dd[:-1, :]
+    disp = np.clip(disp, 0, 1)
+
+# ── FIX 3: Gentle bilateral (keeps edges, smooths flats) ─────
+disp = cv2.bilateralFilter(disp, d=7, sigmaColor=0.08, sigmaSpace=10)
 
 print(f"Depth range: {disp.min():.3f} → {disp.max():.3f}, std={disp.std():.3f}")
 
@@ -261,13 +268,12 @@ uv = np.stack([us.ravel() / (w - 1), 1.0 - vs.ravel() / (h - 1)], axis=-1)
 # ── Mask-aware face build ────────────────────────────────────
 mask_bin = (mask_crop > 127).astype(np.uint8)
 mask_dil = cv2.dilate(mask_bin, np.ones((3, 3), np.uint8), iterations=1)
-mask_dil = cv2.erode(mask_dil, np.ones((3, 3), np.uint8), iterations=2)
 
 m_tl = mask_dil[:-1, :-1].astype(bool)
 m_tr = mask_dil[:-1, 1:].astype(bool)
 m_br = mask_dil[1:, 1:].astype(bool)
 m_bl = mask_dil[1:, :-1].astype(bool)
-valid_cells = m_tl & m_tr & m_br & m_bl
+valid_cells = m_tl & m_tr & m_br & m_bl  # shape (h-1, w-1)
 
 idx = np.arange(h * w).reshape(h, w)
 a = idx[:-1, :-1][valid_cells]
@@ -285,54 +291,90 @@ front_faces = np.vstack([
     np.stack([a, c, d], axis=1),
 ])
 
-if MIRROR_MODE:
-    z_flat = z.ravel()
-    z_mean = z_flat[mask_bin.ravel() > 0].mean()
+# ── Back surface ─────────────────────────────────────────────
+z_flat = z.ravel()
+z_mean = z_flat[mask_bin.ravel() > 0].mean()
+z_back = (z_flat + BACK_THICKNESS - 0.3 * (z_flat - z_mean)).reshape(h, w)
+z_back = np.clip(z_back, z.min(), z.max() + BACK_THICKNESS + 0.5)
 
-    z_back = (z_flat + BACK_THICKNESS - 0.3 * (z_flat - z_mean)).reshape(h, w)
-    z_back = np.clip(z_back, z.min(), z.max() + BACK_THICKNESS + 0.5)
+front_verts = np.stack([X.ravel(), Y.ravel(), z.ravel()], axis=-1)
+back_verts  = np.stack([X.ravel(), Y.ravel(), z_back.ravel()], axis=-1)
+vertices = np.vstack([front_verts, back_verts])
+uv = np.vstack([uv, uv])
 
-    front_verts = np.stack([X.ravel(), Y.ravel(), z.ravel()], axis=-1)
-    back_verts  = np.stack([X.ravel(), Y.ravel(), z_back.ravel()], axis=-1)
-    vertices = np.vstack([front_verts, back_verts])
-    uv = np.vstack([uv, uv])
+off = h * w
+back_faces = np.vstack([
+    np.stack([a + off, c + off, b + off], axis=1),
+    np.stack([a + off, d + off, c + off], axis=1),
+])
 
-    off = h * w
-    back_faces = np.vstack([
-        np.stack([a + off, c + off, b + off], axis=1),
-        np.stack([a + off, d + off, c + off], axis=1),
-    ])
+# ── FIX 4: Neighbour-based edge seam (no contour, no spikes) ─
+print("Building edge seam from grid neighbours...")
 
-    contours, _ = cv2.findContours(mask_dil, cv2.RETR_EXTERNAL,
-                                   cv2.CHAIN_APPROX_SIMPLE)
-    contours = [cv2.approxPolyDP(c, epsilon=2.0, closed=True) for c in contours]
+# valid_cells has shape (h-1, w-1). Detect boundary cells.
+V = valid_cells
 
-    edges = []
-    for cnt in contours:
-        pts = cnt[:, 0, :]
-        n = len(pts)
-        if n < 3:
-            continue
-        for k in range(n):
-            x1_, y1_ = pts[k]
-            x2_, y2_ = pts[(k + 1) % n]
-            f1 = y1_ * w + x1_
-            f2 = y2_ * w + x2_
-            edges.append([f1, f2, f2 + off])
-            edges.append([f1, f2 + off, f1 + off])
-    edges = np.array(edges, dtype=np.int64)
-    faces = np.vstack([front_faces, back_faces, edges])
+above_valid = np.zeros_like(V); above_valid[1:, :] = V[:-1, :]
+below_valid = np.zeros_like(V); below_valid[:-1, :] = V[1:, :]
+left_valid  = np.zeros_like(V); left_valid[:, 1:] = V[:, :-1]
+right_valid = np.zeros_like(V); right_valid[:, :-1] = V[:, 1:]
+
+top_boundary    = V & (~above_valid)
+bottom_boundary = V & (~below_valid)
+left_boundary   = V & (~left_valid)
+right_boundary  = V & (~right_valid)
+
+print(f"Boundary cells: top={top_boundary.sum()}, bottom={bottom_boundary.sum()}, "
+      f"left={left_boundary.sum()}, right={right_boundary.sum()}")
+
+seam_faces_list = []
+
+# Top edges → connect (tl, tr) to (tl+off, tr+off)
+rows, cols = np.where(top_boundary)
+if len(rows):
+    tl = rows * w + cols
+    tr = tl + 1
+    seam_faces_list.append(np.stack([tl, tr, tr + off], axis=1))
+    seam_faces_list.append(np.stack([tl, tr + off, tl + off], axis=1))
+
+# Bottom edges → (bl, br)
+rows, cols = np.where(bottom_boundary)
+if len(rows):
+    bl = (rows + 1) * w + cols
+    br = bl + 1
+    seam_faces_list.append(np.stack([bl, br, br + off], axis=1))
+    seam_faces_list.append(np.stack([bl, br + off, bl + off], axis=1))
+
+# Left edges → (tl, bl)
+rows, cols = np.where(left_boundary)
+if len(rows):
+    tl = rows * w + cols
+    bl = tl + w
+    seam_faces_list.append(np.stack([tl, bl, bl + off], axis=1))
+    seam_faces_list.append(np.stack([tl, bl + off, tl + off], axis=1))
+
+# Right edges → (tr, br)
+rows, cols = np.where(right_boundary)
+if len(rows):
+    tr = rows * w + (cols + 1)
+    br = tr + w
+    seam_faces_list.append(np.stack([tr, br, br + off], axis=1))
+    seam_faces_list.append(np.stack([tr, br + off, tr + off], axis=1))
+
+if seam_faces_list:
+    seam_faces = np.vstack(seam_faces_list).astype(np.int64)
+    faces = np.vstack([front_faces, back_faces, seam_faces])
 else:
-    vertices = np.stack([X.ravel(), Y.ravel(), z.ravel()], axis=-1)
-    faces = front_faces.astype(np.int64)
+    faces = np.vstack([front_faces, back_faces])
 
+print(f"Seam faces: {len(seam_faces) if seam_faces_list else 0}")
 print(f"Mesh: {len(vertices)} vertices, {len(faces)} faces")
 
-# ── FIX 3: Laplacian mesh smoothing (turns stripes into curves) ─
+# ── Laplacian smoothing ──────────────────────────────────────
 print(f"\nApplying {SMOOTH_ITERS} Laplacian smoothing iterations...")
 mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
 try:
-    trimesh.smoothing.filter_laplacian(mesh, lamb=SMOOTH_ITERS * 0.05)
+    trimesh.smoothing.filter_laplacian(mesh, lamb=0.1, iterations=SMOOTH_ITERS)
     print("Laplacian smoothing applied")
 except Exception as e:
     print(f"Laplacian smoothing skipped: {e}")
