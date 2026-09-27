@@ -1,0 +1,92 @@
+name: Test HMR2.0 (4D-Humans)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: System deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgl1 libglib2.0-0 libgomp1 \
+            libsm6 libxext6 libxrender1
+
+      - name: Install PyTorch CPU
+        run: |
+          pip install --upgrade pip
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install Detectron2 (CPU build)
+        run: |
+          python -m pip install 'git+https://github.com/facebookresearch/detectron2.git'
+
+      - name: Install 4D-Humans
+        run: |
+          git clone https://github.com/shubham-goel/4D-Humans.git
+          cd 4D-Humans
+          pip install -e .[all]
+          cd ..
+
+      - name: Install extra deps
+        run: |
+          pip install opencv-python-headless pillow numpy trimesh
+          pip install smplx
+
+      - name: Download SMPL neutral model
+        run: |
+          mkdir -p 4D-Humans/data
+          # SMPL model is license-gated — this is a public mirror
+          # Replace with your own registered download if this fails
+          wget -q -O smplify.tar.gz "https://github.com/classner/up/raw/master/models/3D/basicModel_neutral_lbs_10_207_0_v1.0.0.pkl" \
+            || echo "SMPL download failed — you must provide the file manually"
+          if [ -f basicModel_neutral_lbs_10_207_0_v1.0.0.pkl ]; then
+            mv basicModel_neutral_lbs_10_207_0_v1.0.0.pkl 4D-Humans/data/SMPL_NEUTRAL.pkl
+          fi
+          ls -lh 4D-Humans/data/ || true
+
+      - name: Download HMR2.0 checkpoint
+        run: |
+          mkdir -p 4D-Humans/logs/train/multiruns/hmr2/0/checkpoints/
+          wget -q -O 4D-Humans/logs/train/multiruns/hmr2/0/checkpoints/epoch=35-step=1000000.ckpt \
+            "https://huggingface.co/brjathu/HMR2.0/resolve/main/logs/train/multiruns/hmr2/0/checkpoints/epoch=35-step=1000000.ckpt" \
+            || echo "Checkpoint download failed"
+          wget -q -O 4D-Humans/logs/train/multiruns/hmr2/0/model_config.yaml \
+            "https://huggingface.co/brjathu/HMR2.0/resolve/main/logs/train/multiruns/hmr2/0/model_config.yaml" \
+            || echo "Config download failed"
+
+      - name: Run test
+        run: python -u test_hmr2.py
+
+      - name: Sync with remote
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main || true
+
+      - name: Commit output
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Test HMR2.0 output"
+          file_pattern: "out_hmr2/*"
+          branch: main
+          push_options: '--force-with-lease'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hmr2-results
+          path: out_hmr2/
