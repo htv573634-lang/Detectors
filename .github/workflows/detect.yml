@@ -25,9 +25,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install ultralytics
-          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-          pip install transformers pillow opencv-python-headless
+          pip install openvino requests opencv-python-headless numpy
 
       - name: Run Detector
         run: python run.py
@@ -43,7 +41,7 @@ jobs:
       - name: Commit results to repo
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: " Auto-saved Ultra Class 3D results"
+          commit_message: " Auto-saved OpenVINO True 3D results"
           file_pattern: "artifacts/*"
           branch: main
 
