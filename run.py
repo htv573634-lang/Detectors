@@ -13,8 +13,19 @@ def log(msg):
 os.makedirs("inputs", exist_ok=True)
 os.makedirs("artifacts", exist_ok=True)
 
+# ==========================================
+# CLEANUP PREVIOUS ARTIFACTS
+# ==========================================
+log("Cleaning up previous artifacts...")
+for f in os.listdir("artifacts"):
+    file_path = os.path.join("artifacts", f)
+    if os.path.isfile(file_path):
+        os.remove(file_path)
+log("Artifacts folder cleared.")
+# ==========================================
+
 log("="*60)
-log("TRUE 3D FUSION: YOLO11-Large (Occlusion Master) + DEPTH")
+log("TRUE 3D SKELETON BUILDER (Root-Relative & Scaled)")
 log("="*60)
 
 images = [f for f in os.listdir("inputs") if f.lower().endswith(('.png','.jpg','.jpeg'))]
@@ -25,10 +36,10 @@ if not images:
 # ==========================================
 # LOAD MODELS
 # ==========================================
-log("Loading YOLO11-Large Pose (Best for complex/hidden poses)...")
+log("Loading YOLO11-Large Pose...")
 model = YOLO('yolo11l-pose.pt') 
 
-log("Loading Depth Anything V2 (Small - True 3D)...")
+log("Loading Depth Anything V2 (Small)...")
 depth_pipe = pipeline(task="depth-estimation", model="depth-anything/Depth-Anything-V2-Small-hf")
 
 keypoint_names = [
@@ -38,7 +49,13 @@ keypoint_names = [
     "left_knee", "right_knee", "left_ankle", "right_ankle"
 ]
 
-model_name = "yolo11l-3d-fusion"
+# Indices for key joints
+IDX_L_HIP = 11
+IDX_R_HIP = 12
+IDX_L_SHOULDER = 5
+IDX_R_SHOULDER = 6
+
+model_name = "real-3d-skeleton"
 
 for img_name in images:
     img_path = os.path.join("inputs", img_name)
@@ -53,9 +70,9 @@ for img_name in images:
     h, w = img_rgb.shape[:2]
     
     # ==========================================
-    # STAGE 1: GET TRUE DEPTH MAP
+    # STAGE 1: GET DEPTH & 2D POSE
     # ==========================================
-    log("\n--- STAGE 1: CALCULATING TRUE 3D DEPTH ---")
+    log("\n--- STAGE 1: CAMERA-SPACE 3D ---")
     pil_img = Image.fromarray(img_rgb)
     depth_result = depth_pipe(pil_img)
     depth_map = np.array(depth_result["depth"])
@@ -67,58 +84,62 @@ for img_name in images:
     else:
         depth_norm = depth_map
         
-    log(f"Depth Range Normalized: 0.0 (Closest) to 1.0 (Furthest)")
-
-    # ==========================================
-    # STAGE 2: YOLO 2D + DEPTH FUSION (WITH TTA)
-    # ==========================================
-    log("\n--- STAGE 2: FUSING 2D POSE WITH TRUE DEPTH ---")
-    
-    # augment=True forces YOLO to check flipped/scaled versions of the image
     results = model(img_path, augment=True)
     
-    if results[0].keypoints and results[0].keypoints.xy is not None:
-        kpts = results[0].keypoints.xy[0]
-        confs = results[0].keypoints.conf[0]
+    if not (results[0].keypoints and results[0].keypoints.xy is not None):
+        log("No human detected.")
+        continue
         
-        log("True 3D Coordinates (Occlusion-Enhanced):")
-        log("-"*75)
+    kpts = results[0].keypoints.xy[0]
+    confs = results[0].keypoints.conf[0]
+    
+    # Build initial Camera-Space 3D array [X, Y, Z]
+    camera_3d = np.zeros((17, 3))
+    for i in range(17):
+        px = max(0, min(w - 1, int(kpts[i][0])))
+        py = max(0, min(h - 1, int(kpts[i][1])))
+        # Note: Y is inverted for 3D space (up is positive)
+        camera_3d[i] = [kpts[i][0], -kpts[i][1], depth_norm[py, px]]
         
-        for i, name in enumerate(keypoint_names):
-            x_2d = float(kpts[i][0])
-            y_2d = float(kpts[i][1])
-            conf = float(confs[i])
-            
-            px = max(0, min(w - 1, int(x_2d)))
-            py = max(0, min(h - 1, int(y_2d)))
-            
-            true_z = float(depth_norm[py, px])
-            
-            # Smart Interpolation for hidden knees/ankles
-            if conf < 0.50 and "knee" in name:
-                hip_idx = keypoint_names.index(name.replace("knee", "hip"))
-                ankle_idx = keypoint_names.index(name.replace("knee", "ankle"))
-                
-                hip_x, hip_y = int(kpts[hip_idx][0]), int(kpts[hip_idx][1])
-                ankle_x, ankle_y = int(kpts[ankle_idx][0]), int(kpts[ankle_idx][1])
-                
-                hip_z = float(depth_norm[max(0, min(h-1, hip_y)), max(0, min(w-1, hip_x))])
-                ankle_z = float(depth_norm[max(0, min(h-1, ankle_y)), max(0, min(w-1, ankle_x))])
-                
-                true_z = (hip_z + ankle_z) / 2.0
-                status = " [INTERPOLATED]"
-            elif conf < 0.50:
-                status = " [LOW CONF]"
-            else:
-                status = " [VISIBLE]"
-            
-            log(f"{name:<15} | 2D:({x_2d:>3.0f},{y_2d:>3.0f}) | True Z:{true_z:.4f} | Conf:{conf:.2f}{status}")
-        log("-"*75)
+    # ==========================================
+    # STAGE 2: CONVERT TO REAL 3D SKELETON
+    # ==========================================
+    log("\n--- STAGE 2: BUILDING REAL 3D SKELETON ---")
+    
+    # 1. ROOT THE SKELETON (Move Hips to 0,0,0)
+    hip_center = (camera_3d[IDX_L_HIP] + camera_3d[IDX_R_HIP]) / 2.0
+    root_relative_3d = camera_3d - hip_center
+    
+    # 2. SCALE TO REAL WORLD (Meters)
+    # Calculate current 3D distance between shoulders
+    shoulder_dist = np.linalg.norm(root_relative_3d[IDX_L_SHOULDER] - root_relative_3d[IDX_R_SHOULDER])
+    
+    # Average human shoulder width is ~0.40 meters. Scale the whole skeleton to match.
+    if shoulder_dist > 0:
+        scale_factor = 0.40 / shoulder_dist
+        real_world_3d = root_relative_3d * scale_factor
     else:
-        log("No human detected by YOLO.")
+        real_world_3d = root_relative_3d
+        
+    log("Real-World 3D Skeleton Coordinates (Meters, Rooted at Hips):")
+    log("-"*75)
+    log(f"{'JOINT':<15} | {'X (Left/Right)':<15} | {'Y (Up/Down)':<15} | {'Z (Front/Back)':<15}")
+    log("-"*75)
+    
+    for i, name in enumerate(keypoint_names):
+        x, y, z = real_world_3d[i]
+        # Invert Y back so Up is Positive for easier reading
+        log(f"{name:<15} | X:{x:<14.4f} | Y:{-y:<14.4f} | Z:{z:<14.4f}")
+    log("-"*75)
+    
+    # Calculate total height (Nose to average Ankle)
+    nose_y = -real_world_3d[0][1]
+    ankle_y = (-real_world_3d[15][1] + -real_world_3d[16][1]) / 2.0
+    estimated_height = nose_y - ankle_y + 0.1 # Add 0.1m for head top
+    log(f"Estimated Real-World Height: {estimated_height:.2f} meters")
 
     # ==========================================
-    # SAVE VISUAL ARTIFACTS ONLY
+    # SAVE VISUAL ARTIFACTS
     # ==========================================
     base = os.path.splitext(img_name)[0]
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -135,4 +156,4 @@ for img_name in images:
     
     log(f"\nSaved visual artifacts for {img_name}")
 
-log("\nDONE! Check artifacts folder and run logs for calculations.")
+log("\nDONE! Check artifacts folder and run logs for the Real 3D Skeleton.")
