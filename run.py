@@ -1,11 +1,9 @@
 import os
 import cv2
 import sys
+import subprocess
 import numpy as np
-import requests
 from datetime import datetime
-
-# FIX: Updated import for modern OpenVINO versions
 from openvino import Core
 
 def log(msg):
@@ -33,20 +31,26 @@ if not images:
     sys.exit(0)
 
 # ==========================================
-# DOWNLOAD OPENVINO 3D POSE MODEL
+# DOWNLOAD MODEL USING OFFICIAL OMZ DOWNLOADER
 # ==========================================
-model_xml = "models/human-pose-estimation-3d-0001.xml"
-model_bin = "models/human-pose-estimation-3d-0001.bin"
+log("Downloading OpenVINO 3D Pose Model via OMZ Downloader...")
+# This guarantees we get the correct, valid XML/BIN files, no 404 HTML errors
+subprocess.run([
+    "omz_downloader",
+    "--name", "human-pose-estimation-3d-0001",
+    "--output_dir", "models",
+    "--precision", "FP32"
+], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+log("Model downloaded successfully.")
+
+# The downloader places files in: models/intel/<model_name>/FP32/
+model_dir = os.path.join("models", "intel", "human-pose-estimation-3d-0001", "FP32")
+model_xml = os.path.join(model_dir, "human-pose-estimation-3d-0001.xml")
+model_bin = os.path.join(model_dir, "human-pose-estimation-3d-0001.bin")
 
 if not os.path.exists(model_xml) or not os.path.exists(model_bin):
-    log("Downloading Intel OpenVINO 3D Pose Model (First run only)...")
-    base_url = "https://storage.openvinotoolkit.org/repositories/open_model_zoo/2022.3/models_bin/3/human-pose-estimation-3d-0001/FP32/"
-    
-    with open(model_xml, "wb") as f:
-        f.write(requests.get(base_url + "human-pose-estimation-3d-0001.xml").content)
-    with open(model_bin, "wb") as f:
-        f.write(requests.get(base_url + "human-pose-estimation-3d-0001.bin").content)
-    log("Model downloaded successfully.")
+    log("ERROR: Model files not found after download!")
+    sys.exit(1)
 
 # ==========================================
 # LOAD OPENVINO ENGINE
@@ -55,8 +59,6 @@ log("Initializing OpenVINO Core (CPU)...")
 core = Core()
 model = core.read_model(model=model_xml, weights=model_bin)
 compiled_model = core.compile_model(model=model, device_name="CPU")
-input_layer = compiled_model.input(0)
-output_layer = compiled_model.output(0)
 
 # OpenVINO 3D Pose expects 1x3x256x448 input
 target_h, target_w = 256, 448
@@ -81,7 +83,6 @@ for img_name in images:
         continue
         
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    orig_h, orig_w = img_rgb.shape[:2]
     
     # ==========================================
     # PREPROCESS FOR OPENVINO
@@ -93,7 +94,7 @@ for img_name in images:
     # STAGE 1: TRUE 3D INFERENCE
     # ==========================================
     log("\n--- STAGE 1: TRUE 3D INFERENCE ---")
-    result = compiled_model([input_tensor])[output_layer]
+    result = compiled_model([input_tensor])[compiled_model.output(0)]
     
     # Scale factor to approximate real-world meters (assuming ~1.7m human)
     scale_factor = 1.7 
@@ -108,7 +109,7 @@ for img_name in images:
         y = result[0, 0, 1, i] * scale_factor
         z = result[0, 0, 2, i] * scale_factor
         
-        y_inv = -y
+        y_inv = -y # Invert Y so Up is Positive
         
         name = keypoint_names[i]
         log(f"{name:<15} | X:{x:<14.4f} | Y:{y_inv:<14.4f} | Z:{z:<14.4f}")
