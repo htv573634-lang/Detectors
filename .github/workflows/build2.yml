@@ -1,63 +1,56 @@
-name: Run 3D Detector 2
+name: Run 3D Human Fusion
 
 on:
   push:
-    paths:
-      - 'inputs2/**'
+    paths: ['inputs2/**']
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  detect:
+  reconstruct:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0          # full history so rebase works
-          ref: main
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0, ref: main }
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.10' }
 
-      - name: Install system deps
+      - name: System deps
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libegl1 libgl1 libglib2.0-0 libgomp1 \
             libsm6 libxext6 libxrender1
 
-      - name: Install Python deps
+      - name: Python deps
         run: |
-          pip install opencv-python-headless numpy
+          pip install opencv-python-headless numpy pillow trimesh
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          pip install transformers pillow
-          pip install open3d trimesh
+          pip install transformers smplx
 
-      - name: Run Detector
+      - name: Download SMPL model
+        run: |
+          # REQUIRED: you must download SMPL_NEUTRAL.pkl yourself
+          # from https://smpl.is.tue.mpg.de/ (free, research license)
+          mkdir -p data
+          # cp /path/to/SMPL_NEUTRAL.pkl data/
+
+      - name: Run fusion
         run: python run2.py
 
-      - name: Sync with remote before pushing
-        run: |
-          git config --global user.name  "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git pull --rebase origin main || true
-
-      - name: Commit results to repo
+      - name: Commit GLB
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Auto-saved GLB"
+          commit_message: "Auto-saved fused GLB"
           file_pattern: "artifacts2/*.glb"
           branch: main
           push_options: '--force-with-lease'
 
-      - name: Upload as downloadable artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: detection-results-2
+          name: human-mesh
           path: artifacts2/*.glb
