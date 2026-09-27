@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 os.environ["HOME"] = os.getcwd()
 os.environ["TORCH_HOME"] = os.path.join(os.getcwd(), ".cache", "torch")
 
-# ── PyTorch 2.6+ weights_only patch ─────────────────────────
+# PyTorch 2.6+ weights_only patch
 _orig_torch_load = torch.load
 def _patched_load(*args, **kwargs):
     kwargs["weights_only"] = False
@@ -18,7 +18,7 @@ def _patched_load(*args, **kwargs):
 torch.load = _patched_load
 print("[OK] torch.load patched for PyTorch 2.6+")
 
-# ── Patch .cuda() to no-op on CPU-only runners ──────────────
+# Patch .cuda() to no-op on CPU-only runners
 if not torch.cuda.is_available():
     def _noop_module_cuda(self, device=None):
         return self
@@ -28,7 +28,7 @@ if not torch.cuda.is_available():
     torch.Tensor.cuda = _noop_tensor_cuda
     print("[OK] Patched .cuda() to no-op (CPU-only runner)")
 
-# ── Stub pyrender + OpenGL ──────────────────────────────────
+# Stub pyrender + OpenGL
 sys.modules["pyrender"] = MagicMock()
 sys.modules["pyrender.light"] = MagicMock()
 sys.modules["pyrender.material"] = MagicMock()
@@ -40,8 +40,8 @@ sys.modules["OpenGL"] = MagicMock()
 sys.modules["OpenGL.GL"] = MagicMock()
 print("[OK] pyrender/OpenGL stubbed")
 
-INPUT_DIR   = "inputs2"
-OUTPUT_DIR  = "out_hmr2"
+INPUT_DIR = "inputs2"
+OUTPUT_DIR = "out_hmr2"
 
 SMPL_GENDER = os.environ.get("SMPL_GENDER", "female").lower()
 if SMPL_GENDER not in ("male", "female"):
@@ -74,11 +74,11 @@ H, W = img_rgb.shape[:2]
 print(f"[INFO] Image size: {W}x{H}")
 
 CACHE_DIR = os.path.join(os.getcwd(), ".cache", "4DHumans", "data")
-SMPL_DIR  = os.path.join(CACHE_DIR, "smpl")
+SMPL_DIR = os.path.join(CACHE_DIR, "smpl")
 os.makedirs(SMPL_DIR, exist_ok=True)
 
 GENDER_FILE_MAP = {
-    "male":   "SMPL_MALE.pkl",
+    "male": "SMPL_MALE.pkl",
     "female": "SMPL_FEMALE.pkl",
 }
 target_smpl = os.path.join(SMPL_DIR, GENDER_FILE_MAP[SMPL_GENDER])
@@ -151,7 +151,7 @@ print("[INFO] Loading ViTDet detector...")
 VITDET_CFG_PATH = "detectron2-src/projects/ViTDet/configs/COCO/cascade_mask_rcnn_vitdet_h_75ep.py"
 if not os.path.exists(VITDET_CFG_PATH):
     raise FileNotFoundError(f"ViTDet config not found at {VITDET_CFG_PATH}")
-print(f"[OK] ViTDet config found")
+print("[OK] ViTDet config found")
 
 detectron2_cfg = LazyConfig.load(VITDET_CFG_PATH)
 detectron2_cfg.train.init_checkpoint = (
@@ -208,6 +208,19 @@ for i, batch in enumerate(dataloader):
     obj_path = os.path.join(OUTPUT_DIR, f"hmr2_{SMPL_GENDER}_mesh_{base_name}{suffix}.obj")
     mesh.export(obj_path, file_type="obj")
     print(f"[OK] OBJ: {obj_path} ({os.path.getsize(obj_path)/1024:.1f} KB)")
+
+    # Save params for fusion pipeline
+    params_path = os.path.join(OUTPUT_DIR, f"hmr2_params_{base_name}{suffix}.npz")
+    np.savez(
+        params_path,
+        vertices=pred_vertices,
+        faces=pred_faces,
+        detection_box=boxes[i],
+        image_h=H,
+        image_w=W,
+        gender=SMPL_GENDER,
+    )
+    print(f"[OK] Params: {params_path} ({os.path.getsize(params_path)/1024:.1f} KB)")
 
 print("\n=== Contents of out_hmr2/ ===")
 for f in sorted(os.listdir(OUTPUT_DIR)):
