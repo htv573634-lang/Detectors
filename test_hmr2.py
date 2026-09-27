@@ -39,7 +39,7 @@ jobs:
 
       - name: Test checkpoint load
         run: |
-          python -u -c "
+          python -u -c
           import os, torch, gc, subprocess
           
           print('=== PyTorch version:', torch.__version__)
