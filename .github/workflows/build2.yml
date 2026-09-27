@@ -22,11 +22,17 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install system deps
         run: |
-          pip install "mediapipe==0.10.9" opencv-python-headless numpy
-          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libglib2.0-0 libgomp1
+
+      - name: Install Python deps
+        run: |
+          pip install opencv-python-headless numpy
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install transformers pillow
+          pip install open3d trimesh
 
       - name: Run Detector
         run: python run2.py
@@ -34,12 +40,12 @@ jobs:
       - name: Commit results to repo
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Auto-saved Stage 1 & 2 results"
-          file_pattern: "artifacts2/*"
+          commit_message: "Auto-saved GLB"
+          file_pattern: "artifacts2/*.glb"
           branch: main
 
       - name: Upload as downloadable artifact
         uses: actions/upload-artifact@v4
         with:
           name: detection-results-2
-          path: artifacts2/
+          path: artifacts2/*.glb
