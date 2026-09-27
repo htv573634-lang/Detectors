@@ -1,4 +1,4 @@
-name: Test HMR2.0 (4D-Humans)
+name: Test HMR2.0 (Gendered SMPL)
 
 on:
   workflow_dispatch:
@@ -35,7 +35,7 @@ jobs:
         run: |
           pip install --upgrade setuptools wheel cython
 
-      - name: Install Detectron2 (CPU build, no isolation)
+      - name: Install Detectron2 (CPU, no isolation)
         run: |
           pip install --no-build-isolation 'git+https://github.com/facebookresearch/detectron2.git'
 
@@ -51,16 +51,33 @@ jobs:
           pip install opencv-python-headless pillow numpy trimesh
           pip install smplx
 
-      - name: Download SMPL neutral model
+      - name: Download gendered SMPL files
         run: |
-          mkdir -p 4D-Humans/data
-          wget -q -O /tmp/smpl.pkl \
-            "https://github.com/classner/up/raw/master/models/3D/basicModel_neutral_lbs_10_207_0_v1.0.0.pkl" \
-            && mv /tmp/smpl.pkl 4D-Humans/data/SMPL_NEUTRAL.pkl \
-            && echo "SMPL downloaded: $(ls -lh 4D-Humans/data/SMPL_NEUTRAL.pkl)"
-          if [ ! -f 4D-Humans/data/SMPL_NEUTRAL.pkl ]; then
-            echo "⚠️  SMPL download failed — place file manually"
-          fi
+          mkdir -p data/smpl
+          BASE="https://huggingface.co/camenduru/4D-Humans/resolve/main/data"
+
+          echo "Downloading SMPL_FEMALE.pkl..."
+          wget -q --show-progress -O data/smpl/SMPL_FEMALE.pkl \
+            "$BASE/smpl/SMPL_FEMALE.pkl" \
+            || echo "⚠️  Female download failed"
+
+          echo "Downloading SMPL_MALE.pkl..."
+          wget -q --show-progress -O data/smpl/SMPL_MALE.pkl \
+            "$BASE/smpl/SMPL_MALE.pkl" \
+            || echo "⚠️  Male download failed"
+
+          echo "Downloading smpl_mean_params.npz..."
+          wget -q --show-progress -O data/smpl_mean_params.npz \
+            "$BASE/smpl_mean_params.npz" \
+            || echo "⚠️  Mean params download failed"
+
+          echo "Downloading SMPL_to_J19.pkl..."
+          wget -q --show-progress -O data/SMPL_to_J19.pkl \
+            "$BASE/SMPL_to_J19.pkl" \
+            || echo "⚠️  Joint regressor download failed"
+
+          echo "=== Downloaded files ==="
+          ls -lh data/ data/smpl/ || true
 
       - name: Download HMR2.0 checkpoint
         run: |
@@ -73,18 +90,13 @@ jobs:
           wget -q --show-progress -O checkpoints/epoch=35-step=1000000.ckpt \
             "https://huggingface.co/spaces/brjathu/HMR2.0/resolve/main/logs/train/multiruns/hmr2/0/checkpoints/epoch%3D35-step%3D1000000.ckpt"
 
-          echo "=== Downloaded files ==="
-          ls -lh model_config.yaml
-          ls -lh checkpoints/
-
           SIZE=$(stat -c%s checkpoints/epoch=35-step=1000000.ckpt)
           echo "Checkpoint size: $SIZE bytes"
-          if [ "$SIZE" -lt 100000000 ]; then
-            echo "❌ Checkpoint too small — download failed"
-            exit 1
-          fi
+          [ "$SIZE" -lt 100000000 ] && echo "❌ Checkpoint too small" && exit 1
 
       - name: Run test
+        env:
+          SMPL_GENDER: female
         run: python -u test_hmr2.py
 
       - name: Sync with remote
@@ -96,7 +108,7 @@ jobs:
       - name: Commit output
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Test HMR2.0 output"
+          commit_message: "Test HMR2.0 female output"
           file_pattern: "out_hmr2/*"
           branch: main
           push_options: '--force-with-lease'
