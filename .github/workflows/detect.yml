@@ -26,7 +26,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install openvino openvino-dev opencv-python-headless numpy
-          pip install torch onnx # Required for omz_converter to work
+          pip install torch onnx onnxscript
 
       - name: Run Detector
         run: python run.py
