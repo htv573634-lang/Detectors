@@ -107,4 +107,4 @@ for img_name in images:
     
     log(f"Saved to artifacts/ as {base}_*_{model_name}_*")
 
-log("\nDONE! Check artifacts.")1
+log("\nDONE! Check artifacts.")
