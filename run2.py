@@ -2,18 +2,28 @@ import os
 import glob
 import numpy as np
 import cv2
-import mediapipe as mp
+import torch
 from PIL import Image
 from transformers import pipeline
 import trimesh
+
+# ── Sapiens inference package ─────────────────────────────────
+from sapiens_inference import (
+    SapiensPredictor,
+    SapiensConfig,
+    SapiensSegmentationType,
+)
 
 # ── Config ────────────────────────────────────────────────────
 INPUT_DIR   = "inputs2"
 OUTPUT_DIR  = "artifacts2"
 DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Base-hf"
-Z_AMPLIFY   = 3.5
-MAX_SIDE    = 500
-MIRROR_MODE = True     # True = closed mesh, False = open 2.5D surface
+Z_AMPLIFY   = 5.0          # bumped for more visible curves/folds
+MAX_SIDE    = 800          # more vertices than 500, still GitHub-safe
+MIRROR_MODE = True
+
+# Sapiens segmentation model
+SAPIENS_SEG = SapiensSegmentationType.SEGMENTATION_03B
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -37,41 +47,64 @@ if img_bgr is None:
 img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 H, W = img_rgb.shape[:2]
 
-# ── Stage 1: Detect body part ────────────────────────────────
-print("\n── STAGE 1: Detect body part ──")
+# ── Stage 1: Sapiens body-part segmentation ──────────────────
+print("\n── STAGE 1: Sapiens body-part segmentation ──")
 
-mp_holistic = mp.solutions.holistic
-with mp_holistic.Holistic(
-        static_image_mode=True, model_complexity=1,
-        min_detection_confidence=0.3) as holistic:
-    result = holistic.process(img_rgb)
+sapiens_config = SapiensConfig()
+sapiens_config.device = torch.device("cpu")
+sapiens_config.segmentation_type = SAPIENS_SEG
+# Disable depth/normal inside Sapiens — we use Depth Anything instead
+sapiens_config.depth_type = "OFF"
+sapiens_config.normal_type = "OFF"
 
-mask = np.zeros((H, W), dtype=np.uint8)
+predictor = SapiensPredictor(sapiens_config)
+
+# The predictor returns a dict-like result. The segmentation mask
+# is stored as a 2D array of class IDs (0-27).
+seg_result = predictor(img_rgb)
+
+# Extract the raw class-ID mask
+if isinstance(seg_result, dict) and "segmentation" in seg_result:
+    seg_mask_ids = seg_result["segmentation"]
+elif hasattr(seg_result, "segmentation"):
+    seg_mask_ids = seg_result.segmentation
+else:
+    # Fallback: the package sometimes returns a combined visualisation
+    # and stores the mask under a different key
+    seg_mask_ids = seg_result.get("mask", seg_result)
+
+seg_mask_ids = np.asarray(seg_mask_ids).astype(np.uint8)
+
+# Sapiens 28-class body-part scheme:
+# 0=Background, 1=Apparel, 2=Face_Neck, 3=Hair, 4=Left_Foot,
+# 5=Left_Hand, 6=Left_Lower_Arm, 7=Left_Lower_Leg, 8=Left_Shoe,
+# 9=Left_Sock, 10=Left_Upper_Arm, 11=Left_Upper_Leg,
+# 12=Lower_Clothing, 13=Right_Foot, 14=Right_Hand,
+# 15=Right_Lower_Arm, 16=Right_Lower_Leg, 17=Right_Shoe,
+# 18=Right_Sock, 19=Right_Upper_Arm, 20=Right_Upper_Leg,
+# 21=Torso, 22=Upper_Clothing, 23=Lower_Lip, 24=Upper_Lip,
+# 25=Lower_Teeth, 26=Upper_Teeth, 27=Tongue
+
+# Build a tight foreground mask: anything that is NOT background
+mask = (seg_mask_ids > 0).astype(np.uint8) * 255
+
+# Detect which parts are present (for the filename label)
+unique_classes = np.unique(seg_mask_ids)
 labels = []
-
-def draw_mask(lms, mask, W, H, thickness):
-    pts = np.array([[int(lm.x * W), int(lm.y * H)] for lm in lms.landmark])
-    if len(pts) >= 3:
-        cv2.fillConvexPoly(mask, cv2.convexHull(pts), 255)
-        for p in pts:
-            cv2.circle(mask, tuple(p), thickness, 255, -1)
-
-if result.face_landmarks:
-    draw_mask(result.face_landmarks, mask, W, H, 10); labels.append("face")
-if result.left_hand_landmarks:
-    draw_mask(result.left_hand_landmarks, mask, W, H, 20); labels.append("left_hand")
-if result.right_hand_landmarks:
-    draw_mask(result.right_hand_landmarks, mask, W, H, 20); labels.append("right_hand")
-if result.pose_landmarks:
-    draw_mask(result.pose_landmarks, mask, W, H, 40); labels.append("body")
+if 2 in unique_classes: labels.append("face")
+if 5 in unique_classes: labels.append("left_hand")
+if 14 in unique_classes: labels.append("right_hand")
+if 1 in unique_classes or 21 in unique_classes or 22 in unique_classes:
+    labels.append("body")
 
 if not labels:
-    print("⚠️  No body part detected — using full image.")
-    mask[:] = 255; labels = ["full"]
-else:
-    print(f"Detected: {'+'.join(labels)}")
+    labels = ["full"]
 
-mask = cv2.GaussianBlur(mask, (21, 21), 0)
+print(f"Detected classes: {unique_classes}")
+print(f"Detected parts: {'+'.join(labels)}")
+
+# Sapiens masks are already tight — smooth only the edges slightly
+mask = cv2.GaussianBlur(mask, (7, 7), 0)
 mask = (mask > 127).astype(np.uint8) * 255
 
 ys, xs = np.where(mask > 0)
@@ -91,7 +124,7 @@ else:
     raw = np.array(out["depth"]).astype(np.float32)
 
 if raw.shape != (H, W):
-    raw = cv2.resize(raw, (W, H), interpolation=cv2.INTER_CUBIC)
+    raw = cv2.resize(raw, (W, H), interpolation=cv2.INTER_LANCZOS4)
 
 raw_crop  = raw[y0:y1, x0:x1]
 mask_crop = mask[y0:y1, x0:x1]
@@ -131,53 +164,39 @@ c = idx[1:, 1:].ravel()
 d = idx[1:, :-1].ravel()
 
 if MIRROR_MODE:
-    # ── Closed shell: front surface + mirrored back surface + edge seam ──
     z_mean = z.mean()
-    z_back = 2 * z_mean - z              # mirror across mean depth
+    z_back = 2 * z_mean - z
     z_back = np.clip(z_back, z.min() - 0.5, z.max() + 0.5)
 
     front_verts = np.stack([X.ravel(), Y.ravel(), z.ravel()], axis=-1)
     back_verts  = np.stack([X.ravel(), Y.ravel(), z_back.ravel()], axis=-1)
     vertices = np.vstack([front_verts, back_verts])
-
-    # UV: same image on both sides
     uv = np.vstack([uv, uv])
 
-    # Front faces
     front_faces = np.vstack([
         np.stack([a, b, c], axis=1),
         np.stack([a, c, d], axis=1),
     ])
 
-    # Back faces (offset indices, reversed winding so normals point outward)
     off = h * w
     back_faces = np.vstack([
         np.stack([a + off, c + off, b + off], axis=1),
         np.stack([a + off, d + off, c + off], axis=1),
     ])
 
-    # Edge seam: connect border of front to corresponding border of back
     edges = []
-
-    # Top row (i=0)
     for j in range(w - 1):
         f0, f1 = idx[0, j], idx[0, j+1]
         edges.append([f0, f0 + off, f1 + off])
         edges.append([f0, f1 + off, f1])
-
-    # Bottom row (i=h-1)
     for j in range(w - 1):
         f0, f1 = idx[h-1, j], idx[h-1, j+1]
         edges.append([f0, f1, f1 + off])
         edges.append([f0, f1 + off, f0 + off])
-
-    # Left column (j=0)
     for i in range(h - 1):
         f0, f1 = idx[i, 0], idx[i+1, 0]
         edges.append([f0, f1, f1 + off])
         edges.append([f0, f1 + off, f0 + off])
-
-    # Right column (j=w-1)
     for i in range(h - 1):
         f0, f1 = idx[i, w-1], idx[i+1, w-1]
         edges.append([f0, f0 + off, f1 + off])
@@ -186,7 +205,6 @@ if MIRROR_MODE:
     edges = np.array(edges, dtype=np.int64)
     faces = np.vstack([front_faces, back_faces, edges])
 else:
-    # ── Open 2.5D surface (old behavior) ──
     vertices = np.stack([X.ravel(), Y.ravel(), z.ravel()], axis=-1)
     faces = np.vstack([
         np.stack([a, b, c], axis=1),
