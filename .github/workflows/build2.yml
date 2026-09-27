@@ -1,0 +1,45 @@
+name: Run 3D Detector 2
+
+on:
+  push:
+    paths:
+      - 'inputs2/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install "mediapipe==0.10.9" opencv-python-headless numpy
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install transformers pillow
+
+      - name: Run Detector
+        run: python run2.py
+
+      - name: Commit results to repo
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Auto-saved Stage 1 & 2 results"
+          file_pattern: "artifacts2/*"
+          branch: main
+
+      - name: Upload as downloadable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: detection-results-2
+          path: artifacts2/
