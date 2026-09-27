@@ -37,49 +37,42 @@ if img_bgr is None:
                            cv2.COLOR_RGB2BGR)
 img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-# ── Stage 1: ROMP → SMPL params ──────────────────────────────
+# ── Stage 1: ROMP → pose params (no SMPL file needed) ────────
 print("\n── STAGE 1: ROMP body pose ──")
 
 import romp
 settings = romp.main.default_settings
 settings.mode = "image"
 settings.show = False
-settings.onnx = True          # CPU-friendly ONNX path
-settings.calc_smpl = True
+settings.onnx = True
+settings.calc_smpl = False          # ← KEY FIX: skip SMPL parser
 
 romp_model = romp.ROMP(settings)
-outputs = romp_model(img_bgr)  # BGR input
+outputs = romp_model(img_bgr)
 
-# ROMP returns a list of dicts; take highest-confidence person
 if isinstance(outputs, dict):
     outputs = [outputs]
 person = max(outputs, key=lambda x: float(np.max(x.get("center_conf", [1]))))
 
-# Extract SMPL parameters (keys used by simple-romp)
 betas        = np.asarray(person["betas"]).reshape(1, -1).astype(np.float32)
 body_pose    = np.asarray(person["pose"]).reshape(1, -1, 3).astype(np.float32)
 global_orient = np.asarray(person.get("global_orient",
                             np.zeros((1, 1, 3)))).reshape(1, 1, 3).astype(np.float32)
 
-# ROMP pose is 24 joints; SMPL body_pose = joints 1..23
 if body_pose.shape[1] == 24:
     global_orient = body_pose[:, :1, :]
     body_pose     = body_pose[:, 1:, :]
 
-print(f"SMPL betas shape : {betas.shape}")
-print(f"body_pose shape  : {body_pose.shape}")
-print(f"global_orient    : {global_orient.shape}")
+print(f"betas: {betas.shape}, body_pose: {body_pose.shape}, orient: {global_orient.shape}")
 
-# ── Stage 2: NoSMPL → solid mesh ─────────────────────────────
+# ── Stage 2: NoSMPL → solid mesh (no SMPL file needed) ──────
 print("\n── STAGE 2: NoSMPL solid mesh ──")
 
 from nosmpl.smpl_onnx import SMPLOnnxRuntime
 smpl_onnx = SMPLOnnxRuntime(SMPL_ONNX)
 
-# NoSMPL expects: body_pose (1,23,3), global_orient (1,1,3), betas (1,10)
 smpl_out = smpl_onnx.forward(body_pose, global_orient, betas)
 
-# Output keys vary by version — handle both common cases
 if isinstance(smpl_out, dict):
     vertices = np.asarray(smpl_out.get("vertices",
                      smpl_out.get("verts")))[0]
@@ -90,7 +83,6 @@ else:
     vertices, faces = np.asarray(smpl_out)[0], smpl_onnx.faces
 
 print(f"SMPL mesh: {vertices.shape[0]} verts, {faces.shape[0]} faces")
-
 mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
 
 # ── Stage 3: Depth Anything → surface detail ─────────────────
@@ -107,7 +99,7 @@ else:
     raw = np.array(res["depth"]).astype(np.float32)
 
 lo, hi = np.percentile(raw, 2), np.percentile(raw, 98)
-disp = np.clip((raw - lo) / (hi - lo + 1e-8), 0, 1)   # 1 = near
+disp = np.clip((raw - lo) / (hi - lo + 1e-8), 0, 1)
 
 H, W = disp.shape
 verts = mesh.vertices.copy()
