@@ -4,7 +4,7 @@ on:
   push:
     paths:
       - 'inputs/**'
-  workflow_dispatch: # <-- THIS ADDS THE MANUAL BUTTON
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -15,8 +15,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -24,7 +22,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install mediapipe opencv-python-headless
+        run: pip install "mediapipe==0.10.9" opencv-python-headless
 
       - name: Run Detector
         run: python run.py
