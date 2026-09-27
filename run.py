@@ -2,6 +2,7 @@ import os
 import cv2
 import sys
 import numpy as np
+import torch
 from datetime import datetime
 from PIL import Image
 from ultralytics import YOLO
@@ -13,19 +14,16 @@ def log(msg):
 os.makedirs("inputs", exist_ok=True)
 os.makedirs("artifacts", exist_ok=True)
 
-# ==========================================
-# CLEANUP PREVIOUS ARTIFACTS
-# ==========================================
+# Cleanup previous artifacts
 log("Cleaning up previous artifacts...")
 for f in os.listdir("artifacts"):
     file_path = os.path.join("artifacts", f)
     if os.path.isfile(file_path):
         os.remove(file_path)
 log("Artifacts folder cleared.")
-# ==========================================
 
 log("="*60)
-log("TRUE 3D SKELETON BUILDER (Root-Relative & Scaled)")
+log("ULTRA CLASS 3D PIPELINE: YOLO11 + VideoPose3D (Meta)")
 log("="*60)
 
 images = [f for f in os.listdir("inputs") if f.lower().endswith(('.png','.jpg','.jpeg'))]
@@ -36,11 +34,25 @@ if not images:
 # ==========================================
 # LOAD MODELS
 # ==========================================
-log("Loading YOLO11-Large Pose...")
+log("Loading YOLO11-Large Pose (2D Accuracy)...")
 model = YOLO('yolo11l-pose.pt') 
 
 log("Loading Depth Anything V2 (Small)...")
 depth_pipe = pipeline(task="depth-estimation", model="depth-anything/Depth-Anything-V2-Small-hf")
+
+log("Loading Ultra Class 3D Lifter (VideoPose3D - CPU)...")
+# This downloads the Meta AI model that lifts 2D to 3D using Transformers
+try:
+    model_3d = torch.hub.load('facebookresearch/video_pose_3d', 'pose3d', pretrained=True)
+    model_3d.eval()
+    # Force CPU
+    device = torch.device('cpu')
+    model_3d.to(device)
+    log("3D Lifter loaded successfully.")
+except Exception as e:
+    log(f"Warning: Could not load 3D lifter. Error: {e}")
+    log("Falling back to 2D only.")
+    model_3d = None
 
 keypoint_names = [
     "nose", "left_eye", "right_eye", "left_ear", "right_ear",
@@ -49,13 +61,7 @@ keypoint_names = [
     "left_knee", "right_knee", "left_ankle", "right_ankle"
 ]
 
-# Indices for key joints
-IDX_L_HIP = 11
-IDX_R_HIP = 12
-IDX_L_SHOULDER = 5
-IDX_R_SHOULDER = 6
-
-model_name = "real-3d-skeleton"
+model_name = "ultra-class-3d"
 
 for img_name in images:
     img_path = os.path.join("inputs", img_name)
@@ -70,84 +76,71 @@ for img_name in images:
     h, w = img_rgb.shape[:2]
     
     # ==========================================
-    # STAGE 1: GET DEPTH & 2D POSE
+    # STAGE 1: YOLO 2D POSE
     # ==========================================
-    log("\n--- STAGE 1: CAMERA-SPACE 3D ---")
-    pil_img = Image.fromarray(img_rgb)
-    depth_result = depth_pipe(pil_img)
-    depth_map = np.array(depth_result["depth"])
-    
-    d_min = np.min(depth_map)
-    d_max = np.max(depth_map)
-    if d_max - d_min > 0:
-        depth_norm = (depth_map - d_min) / (d_max - d_min)
-    else:
-        depth_norm = depth_map
-        
+    log("\n--- STAGE 1: YOLO 2D POSE ---")
     results = model(img_path, augment=True)
     
     if not (results[0].keypoints and results[0].keypoints.xy is not None):
-        log("No human detected.")
+        log("No human detected by YOLO.")
         continue
         
     kpts = results[0].keypoints.xy[0]
     confs = results[0].keypoints.conf[0]
     
-    # Build initial Camera-Space 3D array [X, Y, Z]
-    camera_3d = np.zeros((17, 3))
-    for i in range(17):
-        px = max(0, min(w - 1, int(kpts[i][0])))
-        py = max(0, min(h - 1, int(kpts[i][1])))
-        # Note: Y is inverted for 3D space (up is positive)
-        camera_3d[i] = [kpts[i][0], -kpts[i][1], depth_norm[py, px]]
+    # ==========================================
+    # STAGE 2: ULTRA CLASS 3D LIFTING
+    # ==========================================
+    log("\n--- STAGE 2: 3D LIFTING (Meta VideoPose3D) ---")
+    
+    if model_3d is not None:
+        # Prepare 2D keypoints for the 3D lifter
+        # The lifter expects normalized coordinates centered on the image
+        kpts_2d = kpts.numpy()
         
-    # ==========================================
-    # STAGE 2: CONVERT TO REAL 3D SKELETON
-    # ==========================================
-    log("\n--- STAGE 2: BUILDING REAL 3D SKELETON ---")
-    
-    # 1. ROOT THE SKELETON (Move Hips to 0,0,0)
-    hip_center = (camera_3d[IDX_L_HIP] + camera_3d[IDX_R_HIP]) / 2.0
-    root_relative_3d = camera_3d - hip_center
-    
-    # 2. SCALE TO REAL WORLD (Meters)
-    # Calculate current 3D distance between shoulders
-    shoulder_dist = np.linalg.norm(root_relative_3d[IDX_L_SHOULDER] - root_relative_3d[IDX_R_SHOULDER])
-    
-    # Average human shoulder width is ~0.40 meters. Scale the whole skeleton to match.
-    if shoulder_dist > 0:
-        scale_factor = 0.40 / shoulder_dist
-        real_world_3d = root_relative_3d * scale_factor
+        # Normalize: Center the pose and scale to [-1, 1]
+        kpts_2d[:, 0] = (kpts_2d[:, 0] - w / 2) / w
+        kpts_2d[:, 1] = (kpts_2d[:, 1] - h / 2) / h
+        
+        # Add batch and time dimensions: (1, 1, 17, 2)
+        input_2d = torch.tensor(kpts_2d, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+        
+        # Run the 3D Lifter
+        with torch.no_grad():
+            output_3d = model_3d(input_2d)
+            
+        # Output is in millimeters, relative to the root (hips). Convert to meters.
+        pose_3d_meters = output_3d[0, 0].numpy() / 1000.0
+        
+        log("Real-World 3D Skeleton (Meters, Rooted at Hips):")
+        log("-"*75)
+        log(f"{'JOINT':<15} | {'X (Left/Right)':<15} | {'Y (Up/Down)':<15} | {'Z (Front/Back)':<15}")
+        log("-"*75)
+        
+        for i, name in enumerate(keypoint_names):
+            x, y, z = pose_3d_meters[i]
+            # Invert Y so Up is Positive
+            y_inv = -y 
+            conf = float(confs[i])
+            status = "[VISIBLE]" if conf > 0.50 else "[OCCLUDED]"
+            log(f"{name:<15} | X:{x:<14.4f} | Y:{y_inv:<14.4f} | Z:{z:<14.4f} {status}")
+        log("-"*75)
+        
+        # Calculate Height
+        nose_y = -pose_3d_meters[0][1]
+        l_ankle_y = -pose_3d_meters[15][1]
+        r_ankle_y = -pose_3d_meters[16][1]
+        avg_ankle_y = (l_ankle_y + r_ankle_y) / 2.0
+        estimated_height = (nose_y - avg_ankle_y) + 0.10
+        log(f"Estimated Real-World Height: {estimated_height:.2f} meters")
     else:
-        real_world_3d = root_relative_3d
-        
-    log("Real-World 3D Skeleton Coordinates (Meters, Rooted at Hips):")
-    log("-"*75)
-    log(f"{'JOINT':<15} | {'X (Left/Right)':<15} | {'Y (Up/Down)':<15} | {'Z (Front/Back)':<15}")
-    log("-"*75)
-    
-    for i, name in enumerate(keypoint_names):
-        x, y, z = real_world_3d[i]
-        # Invert Y back so Up is Positive for easier reading
-        log(f"{name:<15} | X:{x:<14.4f} | Y:{-y:<14.4f} | Z:{z:<14.4f}")
-    log("-"*75)
-    
-    # Calculate total height (Nose to average Ankle)
-    nose_y = -real_world_3d[0][1]
-    ankle_y = (-real_world_3d[15][1] + -real_world_3d[16][1]) / 2.0
-    estimated_height = nose_y - ankle_y + 0.1 # Add 0.1m for head top
-    log(f"Estimated Real-World Height: {estimated_height:.2f} meters")
+        log("3D Lifter not available. Skipping 3D calculation.")
 
     # ==========================================
     # SAVE VISUAL ARTIFACTS
     # ==========================================
     base = os.path.splitext(img_name)[0]
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Save Depth Map
-    depth_8bit = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    depth_colored = cv2.applyColorMap(depth_8bit, cv2.COLORMAP_INFERNO)
-    cv2.imwrite(f"artifacts/{base}_depth_{model_name}_{ts}.jpg", depth_colored)
     
     # Save YOLO Skeleton
     if results[0].keypoints:
@@ -156,4 +149,4 @@ for img_name in images:
     
     log(f"\nSaved visual artifacts for {img_name}")
 
-log("\nDONE! Check artifacts folder and run logs for the Real 3D Skeleton.")
+log("\nDONE! Check artifacts folder and run logs for the Ultra Class 3D Skeleton.")
