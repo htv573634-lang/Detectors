@@ -2,12 +2,14 @@ import os
 import cv2
 import json
 import sys
-import math
 import numpy as np
 from datetime import datetime
 from PIL import Image
 import mediapipe as mp
 from transformers import pipeline
+
+# CRITICAL: Force MediaPipe to use CPU and disable GPU context to prevent crashes
+os.environ["MEDIAPIPE_DISABLE_GPU"] = "1"
 
 def log(msg):
     print(msg, flush=True)
@@ -16,11 +18,10 @@ os.makedirs("inputs", exist_ok=True)
 os.makedirs("artifacts", exist_ok=True)
 
 log("="*60)
-log("STAGE 1 & 2 DETECTOR RUNNING")
+log("LOW-MEMORY 3D POSE & DEPTH (Any Pose Ready)")
 log("="*60)
 
 images = [f for f in os.listdir("inputs") if f.lower().endswith(('.png','.jpg','.jpeg'))]
-
 if not images:
     log("No images found in inputs/ folder.")
     sys.exit(0)
@@ -28,11 +29,17 @@ if not images:
 # ==========================================
 # LOAD MODELS
 # ==========================================
-log("Loading Stage 1: MediaPipe 3D Pose...")
+log("Loading MediaPipe 3D (Heavy Model - CPU Only)...")
 mp_pose = mp.solutions.pose
-pose = mp_pose.Pose(static_image_mode=True, model_complexity=2, min_detection_confidence=0.5)
+# model_complexity=2 loads the heavy 3D prior for complex/sitting poses
+pose = mp_pose.Pose(
+    static_image_mode=True, 
+    model_complexity=2, 
+    min_detection_confidence=0.3, # Lowered to catch hidden/occluded joints
+    min_tracking_confidence=0.3
+)
 
-log("Loading Stage 2: Depth Anything V2 (Small)...")
+log("Loading Depth Anything V2 (Small)...")
 depth_pipe = pipeline(task="depth-estimation", model="depth-anything/Depth-Anything-V2-Small-hf")
 
 keypoint_names = [
@@ -42,7 +49,7 @@ keypoint_names = [
     "left_knee", "right_knee", "left_ankle", "right_ankle"
 ]
 
-model_name = "stage1-2-combo"
+model_name = "lowmem-3d"
 
 for img_name in images:
     img_path = os.path.join("inputs", img_name)
@@ -57,65 +64,49 @@ for img_name in images:
     h, w = img_rgb.shape[:2]
     
     # ==========================================
-    # STAGE 1: 3D SKELETON
+    # STAGE 1: 3D POSE (Learned Prior)
     # ==========================================
-    log("\n--- STAGE 1: 3D ANATOMICAL SKELETON ---")
+    log("\n--- STAGE 1: 3D POSE (Handling Complex Poses) ---")
     results = pose.process(img_rgb)
     
     calculations = {}
+    
     if results.pose_world_landmarks:
-        world_landmarks = results.pose_world_landmarks.landmark
-        log("3D World Coordinates (Meters):")
-        log("-"*60)
+        log("3D World Coordinates (Meters) - Relative to Hips:")
+        log("-"*70)
         for i, name in enumerate(keypoint_names):
-            lm = world_landmarks[i]
+            lm = results.pose_world_landmarks.landmark[i]
+            vis = results.pose_landmarks.landmark[i].visibility
+            
             calculations[name] = {
-                "X": round(lm.x, 4), "Y": round(lm.y, 4), 
-                "Z": round(lm.z, 4), "Vis": round(lm.visibility, 2)
+                "X_m": round(lm.x, 4), 
+                "Y_m": round(lm.y, 4), 
+                "Z_m": round(lm.z, 4),
+                "Visibility": round(vis, 2)
             }
-            log(f"{name:<15} | X:{lm.x:<6.4f} | Y:{lm.y:<6.4f} | Z:{lm.z:<6.4f}")
-        log("-"*60)
+            
+            # Highlight hidden joints
+            status = " [HIDDEN/OCCLUDED]" if vis < 0.4 else ""
+            log(f"{name:<15} | X:{lm.x:<6.3f} | Y:{lm.y:<6.3f} | Z:{lm.z:<6.3f} | Vis:{vis:.2f}{status}")
+        log("-"*70)
     else:
-        log("No human detected for Stage 1.")
-        
+        log("No human detected.")
+
     # ==========================================
-    # STAGE 2: DEPTH CALCULATION
+    # STAGE 2: DEPTH MAP
     # ==========================================
-    log("\n--- STAGE 2: DEPTH MAP CALCULATION ---")
-    log("Calculating 3D volume and distance...")
-    
-    # FIX: Convert NumPy array to PIL Image for the Hugging Face pipeline
+    log("\n--- STAGE 2: DEPTH MAP ---")
     pil_img = Image.fromarray(img_rgb)
-    
     depth_result = depth_pipe(pil_img)
-    depth_map = np.array(depth_result["depth"])
+    depth_map_raw = np.array(depth_result["depth"])
     
-    # Calculate Depth Statistics
-    min_d = float(np.min(depth_map))
-    max_d = float(np.max(depth_map))
-    mean_d = float(np.mean(depth_map))
+    # Normalize for stats
+    d_min = float(np.min(depth_map_raw))
+    d_max = float(np.max(depth_map_raw))
+    log(f"Depth Range: {d_min:.2f} (Closest) to {d_max:.2f} (Furthest)")
     
-    # Calculate depth at specific key points
-    center_d = float(depth_map[h//2, w//2])
-    top_left_d = float(depth_map[h//10, w//10])
-    
-    log("Depth Statistics (Raw Values):")
-    log("-"*60)
-    log(f"Minimum Depth (Closest object) : {min_d:.4f}")
-    log(f"Maximum Depth (Furthest object): {max_d:.4f}")
-    log(f"Average Scene Depth             : {mean_d:.4f}")
-    log(f"Depth at Image Center           : {center_d:.4f}")
-    log(f"Depth at Top-Left Corner        : {top_left_d:.4f}")
-    log(f"Depth Range (Max - Min)         : {max_d - min_d:.4f}")
-    log("-"*60)
-    
-    calculations["depth_stats"] = {
-        "min": round(min_d, 4), "max": round(max_d, 4), 
-        "mean": round(mean_d, 4), "center": round(center_d, 4)
-    }
-    
-    # Colorize the depth map for visual artifact
-    depth_norm = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    # Colorize
+    depth_norm = cv2.normalize(depth_map_raw, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     depth_colored = cv2.applyColorMap(depth_norm, cv2.COLORMAP_INFERNO)
     
     # ==========================================
@@ -124,17 +115,14 @@ for img_name in images:
     base = os.path.splitext(img_name)[0]
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    # Save Stage 1 Visual (Skeleton)
+    cv2.imwrite(f"artifacts/{base}_depth_{model_name}_{ts}.jpg", depth_colored)
+    
     if results.pose_landmarks:
         mp_drawing = mp.solutions.drawing_utils
         skeleton_img = img.copy()
         mp_drawing.draw_landmarks(skeleton_img, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
         cv2.imwrite(f"artifacts/{base}_skeleton_{model_name}_{ts}.jpg", skeleton_img)
     
-    # Save Stage 2 Visual (Depth Map)
-    cv2.imwrite(f"artifacts/{base}_depth_{model_name}_{ts}.jpg", depth_colored)
-    
-    # Save Raw Data
     json_out = f"artifacts/{base}_data_{model_name}_{ts}.json"
     with open(json_out, "w") as f:
         json.dump(calculations, f, indent=4)
