@@ -1,4 +1,4 @@
-name: Run 3D Body-Part Reconstruction (Sapiens)
+name: Run 3D Body-Part Reconstruction
 
 on:
   push:
@@ -34,9 +34,10 @@ jobs:
           pip install opencv-python-headless pillow trimesh requests huggingface_hub tqdm
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install transformers
+          pip install rembg onnxruntime
           pip install ultralytics-opencv-headless
           pip install ultralytics
-          pip install sapiens-inferece || echo "Sapiens unavailable — MediaPipe fallback will be used"
+          pip install sapiens-inferece || echo "Sapiens unavailable — rembg fallback"
           pip install "mediapipe==0.10.9"
 
       - name: Run reconstruction
@@ -51,12 +52,12 @@ jobs:
       - name: Commit GLB
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Auto-saved Sapiens body-part GLB"
+          commit_message: "Auto-saved body-part GLB"
           file_pattern: "artifacts2/*.glb"
           branch: main
           push_options: '--force-with-lease'
 
       - uses: actions/upload-artifact@v4
         with:
-          name: body-part-mesh-sapiens
-          path: artifacts2/*.glb
+          name: body-part-mesh
+          path: artifacts2/
