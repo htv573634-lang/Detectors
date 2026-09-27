@@ -98,13 +98,14 @@ cv2.imwrite(
     detail_vis
 )
 
-# Stage 3: Load mesh and compute normals
+# Stage 3: Load mesh (trimesh auto-computes normals as a property)
 print("[INFO] Stage 3: Loading HMR2.0 mesh...")
 mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
 mesh.merge_vertices()
 mesh.remove_unreferenced_vertices()
-mesh.compute_vertex_normals()
 
+# Ensure normals exist -- access the property (auto-computes if missing)
+_ = mesh.vertex_normals
 print("[INFO] Loaded mesh: " + str(len(mesh.vertices)) + " verts")
 
 # Stage 4: Project vertices to pixel coordinates
