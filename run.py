@@ -12,7 +12,7 @@ os.makedirs("inputs", exist_ok=True)
 os.makedirs("artifacts", exist_ok=True)
 
 log("="*60)
-log("3D DETECTOR RUNNING (YOLOv8-Pose)")
+log("3D DETECTOR RUNNING (YOLO11-Pose - State of the Art)")
 log("="*60)
 
 images = [f for f in os.listdir("inputs") if f.lower().endswith(('.png','.jpg','.jpeg'))]
@@ -21,11 +21,11 @@ if not images:
     log("No images found in inputs/ folder.")
     sys.exit(0)
 
-log("Loading YOLOv8-Pose (nano model for speed)...")
-# Using 'yolov8n-pose.pt' (nano) for fastest execution on GitHub runners
-model = YOLO('yolov8n-pose.pt') 
+log("Loading YOLO11-Pose (nano model for speed)...")
+# Using 'yolo11n-pose.pt' - The newest, most accurate model
+model = YOLO('yolo11n-pose.pt') 
 
-# COCO Keypoint names for YOLOv8-Pose
+# COCO Keypoint names for YOLO11-Pose
 keypoint_names = [
     "nose", "left_eye", "right_eye", "left_ear", "right_ear",
     "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
@@ -33,7 +33,7 @@ keypoint_names = [
     "left_knee", "right_knee", "left_ankle", "right_ankle"
 ]
 
-model_name = "yolov8-pose"
+model_name = "yolo11-pose"
 
 for img_name in images:
     img_path = os.path.join("inputs", img_name)
@@ -47,7 +47,6 @@ for img_name in images:
     
     log("Human detected! Calculating...")
     
-    # Get the first (and usually only) person detected
     kpts = results[0].keypoints.xy[0]
     confs = results[0].keypoints.conf[0]
     
@@ -73,15 +72,13 @@ for img_name in images:
     base = os.path.splitext(img_name)[0]
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    # Save filenames with model name included
+    # Save filenames with the new model name
     img_out = f"artifacts/{base}_result_{model_name}_{ts}.jpg"
     json_out = f"artifacts/{base}_data_{model_name}_{ts}.json"
     
-    # Save annotated image using YOLO's built-in plotter
     annotated_frame = results[0].plot()
     cv2.imwrite(img_out, annotated_frame)
     
-    # Save JSON data
     with open(json_out, "w") as f:
         json.dump(calculations, f, indent=4)
     
