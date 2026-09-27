@@ -31,15 +31,19 @@ jobs:
           pip install --upgrade pip
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
-      - name: Install Detectron2 (CPU build)
+      - name: Install build deps
         run: |
-          python -m pip install 'git+https://github.com/facebookresearch/detectron2.git'
+          pip install --upgrade setuptools wheel cython
+
+      - name: Install Detectron2 (CPU build, no isolation)
+        run: |
+          pip install --no-build-isolation 'git+https://github.com/facebookresearch/detectron2.git'
 
       - name: Install 4D-Humans
         run: |
           git clone https://github.com/shubham-goel/4D-Humans.git
           cd 4D-Humans
-          pip install -e .[all]
+          pip install --no-build-isolation -e .[all]
           cd ..
 
       - name: Install extra deps
@@ -50,10 +54,9 @@ jobs:
       - name: Download SMPL neutral model
         run: |
           mkdir -p 4D-Humans/data
-          # SMPL model is license-gated — this is a public mirror
-          # Replace with your own registered download if this fails
-          wget -q -O smplify.tar.gz "https://github.com/classner/up/raw/master/models/3D/basicModel_neutral_lbs_10_207_0_v1.0.0.pkl" \
-            || echo "SMPL download failed — you must provide the file manually"
+          wget -q -O basicModel_neutral_lbs_10_207_0_v1.0.0.pkl \
+            "https://github.com/classner/up/raw/master/models/3D/basicModel_neutral_lbs_10_207_0_v1.0.0.pkl" \
+            || echo "SMPL download failed — provide manually"
           if [ -f basicModel_neutral_lbs_10_207_0_v1.0.0.pkl ]; then
             mv basicModel_neutral_lbs_10_207_0_v1.0.0.pkl 4D-Humans/data/SMPL_NEUTRAL.pkl
           fi
