@@ -1,5 +1,6 @@
 import os
 import glob
+import shutil
 import numpy as np
 import cv2
 from PIL import Image
@@ -7,14 +8,31 @@ from transformers import pipeline
 import trimesh
 
 # ── Config ────────────────────────────────────────────────────
-INPUT_DIR   = "inputs2"
-OUTPUT_DIR  = "artifacts2"
-DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Base-hf"
-Z_AMPLIFY   = 3.0
-MAX_SIDE    = 700
-MIRROR_MODE = True
+INPUT_DIR        = "inputs2"
+OUTPUT_DIR       = "artifacts2"
+DEPTH_MODEL      = "depth-anything/Depth-Anything-V2-Base-hf"
+Z_AMPLIFY        = 3.0
+BACK_THICKNESS   = 1.5      # real thickness of the closed shell
+MAX_SIDE         = 700
+MIRROR_MODE      = True
+
+# ── Cleanup: wipe previous results in artifacts2/ ────────────
+# Keep only .gitkeep so the folder stays tracked
+if os.path.isdir(OUTPUT_DIR):
+    for f in os.listdir(OUTPUT_DIR):
+        if f == ".gitkeep":
+            continue
+        path = os.path.join(OUTPUT_DIR, f)
+        try:
+            if os.path.isfile(path) or os.path.islink(path):
+                os.remove(path)
+            elif os.path.isdir(path):
+                shutil.rmtree(path)
+        except Exception as e:
+            print(f"⚠️  Could not delete {path}: {e}")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+print(f"Cleared {OUTPUT_DIR}/ (kept .gitkeep)")
 
 # ── Universal image finder ────────────────────────────────────
 IMAGE_EXTS = (
@@ -58,18 +76,16 @@ mask = np.zeros((H, W), dtype=np.uint8)
 labels = []
 mask_source = "none"
 
-# ---- Priority 1: Use existing alpha channel as mask ----
+# ---- Priority 1: embedded alpha channel ----
 if has_alpha:
     alpha = np.array(img_pil.convert("RGBA"))[..., 3]
     if alpha.min() < 200 and alpha.max() > 50:
         mask = (alpha > 127).astype(np.uint8) * 255
         mask_source = "alpha-channel"
-        print(f"Using embedded alpha channel as mask")
         labels.append("subject")
-    else:
-        print("Alpha channel is fully opaque — ignoring")
+        print("Using embedded alpha channel as mask")
 
-# ---- Priority 2: Sapiens (if no pre-mask) ----
+# ---- Priority 2: Sapiens ----
 if mask_source == "none":
     try:
         import torch
@@ -113,7 +129,7 @@ if mask_source == "none":
         print(f"Sapiens unavailable ({type(e).__name__}: {e})")
         print("→ Trying rembg fallback.")
 
-# ---- Priority 3: rembg fallback ----
+# ---- Priority 3: rembg ----
 if mask_source == "none":
     try:
         from rembg import remove, new_session
@@ -122,13 +138,13 @@ if mask_source == "none":
         alpha = np.array(rgba)[..., 3]
         mask = (alpha > 127).astype(np.uint8) * 255
         mask_source = "rembg"
-        print("rembg mask generated")
         labels.append("subject")
+        print("rembg mask generated")
     except Exception as e:
         print(f"rembg unavailable ({e})")
-        print("→ Falling back to MediaPipe Holistic.")
+        print("→ Falling back to MediaPipe.")
 
-# ---- Priority 4: MediaPipe (last resort) ----
+# ---- Priority 4: MediaPipe ----
 if mask_source == "none":
     try:
         import mediapipe as mp
@@ -164,7 +180,7 @@ if mask_source == "none":
 
 print(f"Mask source: {mask_source}")
 
-# ── Mask cleanup: solidify + keep largest component ──────────
+# ── Mask cleanup ─────────────────────────────────────────────
 kernel = np.ones((5, 5), np.uint8)
 mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
 mask = cv2.dilate(mask, kernel, iterations=1)
@@ -174,7 +190,6 @@ if num_labels > 1:
     largest = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
     mask = ((lab_imgs == largest).astype(np.uint8)) * 255
 
-# Smooth edges
 mask = cv2.GaussianBlur(mask, (5, 5), 0)
 mask = (mask > 127).astype(np.uint8) * 255
 
@@ -216,9 +231,13 @@ if len(subject_vals) < 10:
     subject_vals = raw_crop.flatten()
 lo, hi = np.percentile(subject_vals, 2), np.percentile(subject_vals, 98)
 disp = np.clip((raw_crop - lo) / (hi - lo + 1e-8), 0, 1)
+
+# Smooth depth to remove noise near edges
+disp = cv2.GaussianBlur(disp, (5, 5), 0)
+
 print(f"Depth range: {disp.min():.3f} → {disp.max():.3f}, std={disp.std():.3f}")
 
-# ── Stage 3: Downscale ───────────────────────────────────────
+# ── Stage 3: Downscale + build mesh ──────────────────────────
 print("\n── STAGE 3: Reconstruct mesh ──")
 
 h, w = disp.shape
@@ -242,6 +261,8 @@ uv = np.stack([us.ravel() / (w - 1), 1.0 - vs.ravel() / (h - 1)], axis=-1)
 # ── Mask-aware face build ────────────────────────────────────
 mask_bin = (mask_crop > 127).astype(np.uint8)
 mask_dil = cv2.dilate(mask_bin, np.ones((3, 3), np.uint8), iterations=1)
+# Erode slightly to avoid depth edge artifacts
+mask_dil = cv2.erode(mask_dil, np.ones((3, 3), np.uint8), iterations=2)
 
 m_tl = mask_dil[:-1, :-1].astype(bool)
 m_tr = mask_dil[:-1, 1:].astype(bool)
@@ -268,7 +289,10 @@ front_faces = np.vstack([
 if MIRROR_MODE:
     z_flat = z.ravel()
     z_mean = z_flat[mask_bin.ravel() > 0].mean()
-    z_back = (2 * z_mean - z_flat).reshape(h, w)
+
+    # Back surface: offset + slight curve (real thickness, not thin mirror)
+    z_back = (z_flat + BACK_THICKNESS - 0.3 * (z_flat - z_mean)).reshape(h, w)
+    z_back = np.clip(z_back, z.min(), z.max() + BACK_THICKNESS + 0.5)
 
     front_verts = np.stack([X.ravel(), Y.ravel(), z.ravel()], axis=-1)
     back_verts  = np.stack([X.ravel(), Y.ravel(), z_back.ravel()], axis=-1)
@@ -281,8 +305,11 @@ if MIRROR_MODE:
         np.stack([a + off, d + off, c + off], axis=1),
     ])
 
+    # Smoothed contour for edge seam
     contours, _ = cv2.findContours(mask_dil, cv2.RETR_EXTERNAL,
-                                   cv2.CHAIN_APPROX_NONE)
+                                   cv2.CHAIN_APPROX_SIMPLE)
+    contours = [cv2.approxPolyDP(c, epsilon=2.0, closed=True) for c in contours]
+
     edges = []
     for cnt in contours:
         pts = cnt[:, 0, :]
@@ -304,7 +331,7 @@ else:
 
 print(f"Mesh: {len(vertices)} vertices, {len(faces)} faces")
 
-# ── Stage 4: Textured GLB ────────────────────────────────────
+# ── Stage 4: Export textured GLB ─────────────────────────────
 print("\n── STAGE 4: Export GLB ──")
 
 mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
@@ -325,4 +352,12 @@ glb_path = os.path.join(OUTPUT_DIR, f"{label_str}_{base_name}_{suffix}.glb")
 mesh.export(glb_path)
 print(f"Saved: {glb_path}")
 print(f"Size: {os.path.getsize(glb_path)/1024/1024:.2f} MB")
-print("DONE.")
+
+# ── Final listing of artifacts2/ ─────────────────────────────
+print("\n── Contents of artifacts2/ ──")
+for f in sorted(os.listdir(OUTPUT_DIR)):
+    p = os.path.join(OUTPUT_DIR, f)
+    if os.path.isfile(p):
+        print(f"  {f}  ({os.path.getsize(p)/1024:.1f} KB)")
+
+print("\nDONE.")
