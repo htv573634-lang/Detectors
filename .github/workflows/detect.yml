@@ -23,9 +23,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install "mediapipe==0.10.9" opencv-python-headless numpy
+          pip install ultralytics
           pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-          pip install transformers pillow
+          pip install transformers pillow opencv-python-headless
 
       - name: Run Detector
         run: python run.py
@@ -33,7 +33,7 @@ jobs:
       - name: Commit results to repo
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: " Auto-saved Stage 1 & 2 results"
+          commit_message: " Auto-saved True 3D Fusion results"
           file_pattern: "artifacts/*"
           branch: main
 
