@@ -5,6 +5,7 @@ import sys
 import math
 import numpy as np
 from datetime import datetime
+from PIL import Image
 import mediapipe as mp
 from transformers import pipeline
 
@@ -32,7 +33,6 @@ mp_pose = mp.solutions.pose
 pose = mp_pose.Pose(static_image_mode=True, model_complexity=2, min_detection_confidence=0.5)
 
 log("Loading Stage 2: Depth Anything V2 (Small)...")
-# Using the lightweight V2 Small model optimized for CPU
 depth_pipe = pipeline(task="depth-estimation", model="depth-anything/Depth-Anything-V2-Small-hf")
 
 keypoint_names = [
@@ -40,13 +40,6 @@ keypoint_names = [
     "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
     "left_wrist", "right_wrist", "left_hip", "right_hip",
     "left_knee", "right_knee", "left_ankle", "right_ankle"
-]
-
-skeleton_connections = [
-    ("left_hip", "left_knee"), ("left_knee", "left_ankle"),
-    ("right_hip", "right_knee"), ("right_knee", "right_ankle"),
-    ("left_shoulder", "left_elbow"), ("left_elbow", "left_wrist"),
-    ("right_shoulder", "right_elbow"), ("right_elbow", "right_wrist")
 ]
 
 model_name = "stage1-2-combo"
@@ -91,7 +84,10 @@ for img_name in images:
     log("\n--- STAGE 2: DEPTH MAP CALCULATION ---")
     log("Calculating 3D volume and distance...")
     
-    depth_result = depth_pipe(img_rgb)
+    # FIX: Convert NumPy array to PIL Image for the Hugging Face pipeline
+    pil_img = Image.fromarray(img_rgb)
+    
+    depth_result = depth_pipe(pil_img)
     depth_map = np.array(depth_result["depth"])
     
     # Calculate Depth Statistics
@@ -99,7 +95,7 @@ for img_name in images:
     max_d = float(np.max(depth_map))
     mean_d = float(np.mean(depth_map))
     
-    # Calculate depth at specific key points (Center, Top-Left, Bottom-Right)
+    # Calculate depth at specific key points
     center_d = float(depth_map[h//2, w//2])
     top_left_d = float(depth_map[h//10, w//10])
     
