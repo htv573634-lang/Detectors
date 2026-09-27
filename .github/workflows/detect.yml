@@ -5,12 +5,17 @@ on:
     paths:
       - 'inputs/**'
 
+permissions:
+  contents: write
+
 jobs:
   detect:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -23,7 +28,14 @@ jobs:
       - name: Run Detector
         run: python run.py
 
-      - name: Upload Results
+      - name: Commit results to repo
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "🤖 Auto-saved detector results"
+          file_pattern: "artifacts/*"
+          branch: main
+
+      - name: Upload as downloadable artifact
         uses: actions/upload-artifact@v4
         with:
           name: detection-results
