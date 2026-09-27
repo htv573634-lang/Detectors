@@ -24,29 +24,28 @@ jobs:
           pip install --upgrade pip
           pip install opencv-python-headless pillow numpy
           pip install paddlepaddle==2.6.2
-          pip install paddle2onnx onnxruntime
+          pip install paddle2onnx==1.3.1
+          pip install onnxruntime
 
       - name: Download PP-HumanSegV1-Lite model
         run: |
-          wget -q -O pp.tar.gz "https://paddleseg.bj.bcebos.com/dygraph/ppseg/ppseg_lite_portrait_398x224.tar.gz"
-          tar -xzf pp.tar.gz
-          find . -name "*.pdmodel" -o -name "*.pdiparams" | head
+          mkdir -p pphumanseg_model
+          cd pphumanseg_model
+          # Download from HuggingFace - files are in a subdirectory
+          wget -q -O model.pdmodel "https://huggingface.co/unography/PP-HumanSegV1-Lite/resolve/main/portrait_pp_humansegv1_lite_398x224_inference_model_with_softmax/model.pdmodel"
+          wget -q -O model.pdiparams "https://huggingface.co/unography/PP-HumanSegV1-Lite/resolve/main/portrait_pp_humansegv1_lite_398x224_inference_model_with_softmax/model.pdiparams"
+          ls -lh
 
       - name: Convert to ONNX
         run: |
-          PD_MODEL=$(find . -name "*.pdmodel" | head -1)
-          PD_PARAMS=$(find . -name "*.pdiparams" | head -1)
-          echo "Model: $PD_MODEL"
-          echo "Params: $PD_PARAMS"
-          MODEL_DIR=$(dirname "$PD_MODEL")
-          cd "$MODEL_DIR"
+          cd pphumanseg_model
           paddle2onnx \
             --model_dir . \
-            --model_filename $(basename "$PD_MODEL") \
-            --params_filename $(basename "$PD_PARAMS") \
-            --save_file "$GITHUB_WORKSPACE/pphumanseg_lite.onnx" \
+            --model_filename model.pdmodel \
+            --params_filename model.pdiparams \
+            --save_file ../pphumanseg_lite.onnx \
             --opset_version 12
-          ls -lh $GITHUB_WORKSPACE/pphumanseg_lite.onnx
+          ls -lh ../pphumanseg_lite.onnx
 
       - name: Run test
         run: python -u test_pp.py
