@@ -36,7 +36,7 @@ if not images:
 # ==========================================
 model_name_omz = "human-pose-estimation-3d-0001"
 
-log(f"1. Downloading {model_name_omz} via OMZ Downloader...")
+log(f"1. Checking/Downloading {model_name_omz}...")
 subprocess.run([
     "omz_downloader",
     "--name", model_name_omz,
@@ -44,15 +44,15 @@ subprocess.run([
     "--precision", "FP32"
 ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-log(f"2. Converting {model_name_omz} to OpenVINO IR (.xml/.bin)...")
+log(f"2. Checking/Converting {model_name_omz} to OpenVINO IR...")
 subprocess.run([
     "omz_converter",
     "--name", model_name_omz,
     "--download_dir", "models",
     "--output_dir", "models"
-], check=True)
+], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-# 3. SMART FIND: Locate the newly created .xml file
+# 3. SMART FIND
 xml_files = glob.glob(f"models/**/{model_name_omz}.xml", recursive=True)
 bin_files = glob.glob(f"models/**/{model_name_omz}.bin", recursive=True)
 
@@ -62,7 +62,7 @@ if not xml_files or not bin_files:
 
 model_xml = xml_files[0]
 model_bin = bin_files[0]
-log(f"Successfully found converted model at: {model_xml}")
+log(f"Model ready at: {model_xml}")
 
 # ==========================================
 # LOAD OPENVINO ENGINE
@@ -75,12 +75,12 @@ compiled_model = core.compile_model(model=model, device_name="CPU")
 # OpenVINO 3D Pose expects 1x3x256x448 input
 target_h, target_w = 256, 448
 
-# COCO 17 keypoints order for this model
+# This model outputs 32 joints. We map the first 17 to standard COCO names.
 keypoint_names = [
-    "nose", "left_eye", "right_eye", "left_ear", "right_ear",
-    "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
-    "left_wrist", "right_wrist", "left_hip", "right_hip",
-    "left_knee", "right_knee", "left_ankle", "right_ankle"
+    "nose", "neck", "right_shoulder", "right_elbow", "right_wrist",
+    "left_shoulder", "left_elbow", "left_wrist", "right_hip", "right_knee", 
+    "right_ankle", "left_hip", "left_knee", "left_ankle", "right_eye", 
+    "left_eye", "right_ear" 
 ]
 
 model_name = "openvino-true-3d"
@@ -94,13 +94,19 @@ for img_name in images:
         log(f"Could not read image: {img_name}")
         continue
         
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    # ==========================================
+    # PREPROCESS FOR OPENVINO (THE FIX)
+    # ==========================================
+    # 1. Keep as BGR (OpenVINO OMZ models expect BGR, not RGB)
+    resized = cv2.resize(img, (target_w, target_h))
     
-    # ==========================================
-    # PREPROCESS FOR OPENVINO
-    # ==========================================
-    resized = cv2.resize(img_rgb, (target_w, target_h))
+    # 2. Transpose to (1, 3, H, W) and scale to 0-1
     input_tensor = np.expand_dims(resized.transpose(2, 0, 1), axis=0).astype(np.float32) / 255.0
+    
+    # 3. Apply ImageNet Normalization (Crucial for OpenVINO)
+    mean = np.array([0.485, 0.456, 0.406]).reshape(1, 3, 1, 1)
+    std = np.array([0.229, 0.224, 0.225]).reshape(1, 3, 1, 1)
+    input_tensor = (input_tensor - mean) / std
     
     # ==========================================
     # STAGE 1: TRUE 3D INFERENCE
@@ -108,31 +114,41 @@ for img_name in images:
     log("\n--- STAGE 1: TRUE 3D INFERENCE ---")
     result = compiled_model([input_tensor])[compiled_model.output(0)]
     
+    # Debug: Print raw output shape and range to ensure it's not zeros
+    log(f"Raw Output Shape: {result.shape}")
+    log(f"Raw Output Min/Max: {np.min(result):.4f} / {np.max(result):.4f}")
+    
     # Scale factor to approximate real-world meters (assuming ~1.7m human)
     scale_factor = 1.7 
     
-    log("Real-World 3D Skeleton Coordinates (Approx. Meters):")
+    log("\nReal-World 3D Skeleton Coordinates (Approx. Meters):")
     log("-"*75)
     log(f"{'JOINT':<15} | {'X (Left/Right)':<15} | {'Y (Up/Down)':<15} | {'Z (Front/Back)':<15}")
     log("-"*75)
     
-    for i in range(17):
+    # The model outputs 32 joints. We will print the first 17.
+    num_joints_to_print = min(17, result.shape[3])
+    
+    for i in range(num_joints_to_print):
         x = result[0, 0, 0, i] * scale_factor
         y = result[0, 0, 1, i] * scale_factor
         z = result[0, 0, 2, i] * scale_factor
         
         y_inv = -y # Invert Y so Up is Positive
         
-        name = keypoint_names[i]
+        name = keypoint_names[i] if i < len(keypoint_names) else f"joint_{i}"
         log(f"{name:<15} | X:{x:<14.4f} | Y:{y_inv:<14.4f} | Z:{z:<14.4f}")
     log("-"*75)
     
-    nose_y = - (result[0, 0, 1, 0] * scale_factor)
-    l_ankle_y = - (result[0, 0, 1, 15] * scale_factor)
-    r_ankle_y = - (result[0, 0, 1, 16] * scale_factor)
-    avg_ankle_y = (l_ankle_y + r_ankle_y) / 2.0
-    estimated_height = (nose_y - avg_ankle_y) + 0.10
-    log(f"Estimated Real-World Height: {estimated_height:.2f} meters")
+    # Calculate approximate height (Nose to average Ankle)
+    # Index 0 is Nose, 10 is Right Ankle, 13 is Left Ankle in this specific model topology
+    if result.shape[3] > 13:
+        nose_y = - (result[0, 0, 1, 0] * scale_factor)
+        r_ankle_y = - (result[0, 0, 1, 10] * scale_factor)
+        l_ankle_y = - (result[0, 0, 1, 13] * scale_factor)
+        avg_ankle_y = (l_ankle_y + r_ankle_y) / 2.0
+        estimated_height = (nose_y - avg_ankle_y) + 0.10
+        log(f"Estimated Real-World Height: {estimated_height:.2f} meters")
 
     # ==========================================
     # SAVE VISUAL ARTIFACTS
