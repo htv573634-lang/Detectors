@@ -19,7 +19,7 @@ SMOOTH_ITERS      = 6
 DOWNSAMPLE_PASSES = 2
 DOWNSAMPLE_SIZE   = 96
 MASK_ERODE_PX     = 3
-MAX_TEXTURE_SIZE  = 1024
+MAX_TEXTURE_SIZE  = 512        # reduced — smaller GLB is more portable
 
 # ── UV Protection Flags ──────────────────────────────────────
 UV_CLAMP         = True
@@ -87,60 +87,14 @@ mask = np.zeros((H, W), dtype=np.uint8)
 labels = []
 mask_source = "none"
 
-# ── Priority 1: Sapiens (anatomy labels + tight mask) ────────
-sapiens_ok = False
-try:
-    import torch
-    from sapiens_inference import (
-        SapiensPredictor, SapiensConfig, SapiensSegmentationType,
-    )
-    from sapiens_inference.normal import SapiensNormalType
-    from sapiens_inference.depth import SapiensDepthType
-
-    cfg = SapiensConfig()
-    cfg.device = torch.device("cpu")
-    cfg.segmentation_type = SapiensSegmentationType.SEGMENTATION_03B
-    cfg.depth_type  = SapiensDepthType.OFF
-    cfg.normal_type = SapiensNormalType.OFF
-
-    predictor = SapiensPredictor(cfg)
-    seg_result = predictor(img_rgb)
-
-    if isinstance(seg_result, dict):
-        seg_mask_ids = seg_result.get("segmentation",
-                        seg_result.get("mask",
-                        seg_result.get("seg_map")))
-    else:
-        seg_mask_ids = seg_result
-
-    seg_mask_ids = np.asarray(seg_mask_ids).astype(np.uint8)
-    sapiens_mask = (seg_mask_ids > 0).astype(np.uint8) * 255
-
-    uc = np.unique(seg_mask_ids)
-    if 2 in uc:  labels.append("face")
-    if 5 in uc:  labels.append("left_hand")
-    if 14 in uc: labels.append("right_hand")
-    if 1 in uc or 21 in uc or 22 in uc: labels.append("body")
-    if not labels: labels = ["full"]
-
-    print(f"Sapiens classes: {uc}")
-    print(f"Sapiens parts: {'+'.join(labels)}")
-
-    mask = sapiens_mask
-    mask_source = "sapiens"
-    sapiens_ok = True
-
-except Exception as e:
-    print(f"Sapiens unavailable ({type(e).__name__}: {e})")
-
-# ── Priority 2: Alpha channel (fast, clean fallback) ─────────
-if not sapiens_ok and alpha_channel is not None and alpha_channel.min() < 200 and alpha_channel.max() > 50:
+# Priority 1: alpha channel (fastest, cleanest)
+if alpha_channel is not None and alpha_channel.min() < 200 and alpha_channel.max() > 50:
     mask = (alpha_channel > 127).astype(np.uint8) * 255
     mask_source = "alpha-channel"
     labels = ["subject"]
-    print("Using alpha channel mask")
+    print("Using alpha channel as mask")
 
-# ── Priority 3: rembg ────────────────────────────────────────
+# Priority 2: rembg
 if mask_source == "none":
     try:
         from rembg import remove, new_session
@@ -153,15 +107,14 @@ if mask_source == "none":
     except Exception as e:
         print(f"rembg unavailable ({e})")
 
-# ── Priority 4: Full image ───────────────────────────────────
+# Priority 3: full image
 if mask_source == "none":
     mask[:] = 255
     mask_source = "full-image"
     labels = ["full"]
-    print("Using full image (no mask)")
+    print("Using full image")
 
 print(f"Mask source: {mask_source}")
-print(f"Labels: {'+'.join(labels)}")
 
 # ── Mask cleanup ─────────────────────────────────────────────
 kernel = np.ones((5, 5), np.uint8)
@@ -213,18 +166,19 @@ if len(subject_vals) < 10:
 lo, hi = np.percentile(subject_vals, 2), np.percentile(subject_vals, 98)
 disp = np.clip((raw_crop - lo) / (hi - lo + 1e-8), 0, 1).astype(np.float32)
 
-# ── Downsample-upsample (stripe killer) ──────────────────────
-print(f"Applying {DOWNSAMPLE_PASSES}× downsample-upsample (size={DOWNSAMPLE_SIZE})...")
+# ── Downsample-upsample WITH ASPECT RATIO PRESERVATION ───────
+print(f"Applying {DOWNSAMPLE_PASSES}× downsample-upsample (max={DOWNSAMPLE_SIZE})...")
 ch, cw = disp.shape
 for i in range(DOWNSAMPLE_PASSES):
-    small = cv2.resize(disp, (DOWNSAMPLE_SIZE, DOWNSAMPLE_SIZE),
-                       interpolation=cv2.INTER_AREA)
+    scale_small = DOWNSAMPLE_SIZE / max(ch, cw)
+    small_h = max(8, int(ch * scale_small))
+    small_w = max(8, int(cw * scale_small))
+    small = cv2.resize(disp, (small_w, small_h), interpolation=cv2.INTER_AREA)
     disp = cv2.resize(small, (cw, ch), interpolation=cv2.INTER_CUBIC)
     disp = np.clip(disp, 0.0, 1.0)
     disp = cv2.GaussianBlur(disp, (3, 3), 0)
     disp = np.clip(disp, 0.0, 1.0)
 
-# ── Edge-preserving bilateral ────────────────────────────────
 disp = cv2.bilateralFilter(disp, d=9, sigmaColor=0.20, sigmaSpace=15)
 disp = np.clip(disp, 0.0, 1.0)
 
@@ -296,9 +250,9 @@ vertices = np.vstack([front_verts, back_verts])
 if UV_BACK_SOLID:
     solid_uv = np.full_like(uv_front, 0.005)
     uv = np.vstack([uv_front, solid_uv])
-    print("Back UVs mapped to solid corner")
 else:
     uv = np.vstack([uv_front, uv_front])
+print("Back UVs mapped to solid corner")
 
 off = h * w
 back_faces = np.vstack([
@@ -352,7 +306,7 @@ else:
 
 print(f"Mesh raw: {len(vertices)} vertices, {len(faces)} faces")
 
-# ── Clean BEFORE smoothing ───────────────────────────────────
+# ── Build trimesh ────────────────────────────────────────────
 mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
 mesh.merge_vertices()
 mesh.remove_unreferenced_vertices()
@@ -360,12 +314,34 @@ print(f"Pre-smooth: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
 
 print(f"Applying {SMOOTH_ITERS} Laplacian iterations...")
 try:
+    # Save a copy for volume-preserving smoothing
     trimesh.smoothing.filter_laplacian(mesh, lamb=0.1, iterations=SMOOTH_ITERS)
     print("Laplacian smoothing applied")
 except Exception as e:
     print(f"Laplacian skipped: {e}")
 
+# ── FIX: Remove NaN/inf vertices after smoothing ─────────────
 mesh.remove_unreferenced_vertices()
+verts_np = np.asarray(mesh.vertices)
+faces_np = np.asarray(mesh.faces)
+
+finite_verts = np.isfinite(verts_np).all(axis=1)
+if not finite_verts.all():
+    n_bad = (~finite_verts).sum()
+    print(f"⚠️  Removing {n_bad} NaN/inf vertices")
+    # Keep only faces where all 3 verts are finite
+    face_finite = finite_verts[faces_np].all(axis=1)
+    faces_np = faces_np[face_finite]
+    # Reindex
+    used = np.unique(faces_np)
+    remap = -np.ones(len(verts_np), dtype=np.int64)
+    remap[used] = np.arange(len(used))
+    verts_np = verts_np[used]
+    faces_np = remap[faces_np]
+    mesh = trimesh.Trimesh(vertices=verts_np, faces=faces_np, process=False)
+
+# Final NaN check
+assert np.isfinite(mesh.vertices).all(), "NaN still present"
 print(f"After cleanup: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
 
 # ── Stage 4: Texture (with size cap) ─────────────────────────
@@ -379,6 +355,10 @@ if max(tex_h, tex_w) > MAX_TEXTURE_SIZE:
     rgb_crop = cv2.resize(rgb_crop, (new_tex_w, new_tex_h),
                           interpolation=cv2.INTER_AREA)
     print(f"Texture resized to {new_tex_w}×{new_tex_h}")
+
+# Ensure RGB uint8
+if rgb_crop.dtype != np.uint8:
+    rgb_crop = rgb_crop.astype(np.uint8)
 
 # 2px border
 BORDER = 2
@@ -394,34 +374,46 @@ uv_pad = uv.copy()
 uv_pad[:, 0] = (uv[:, 0] * (pad_w - 2 * BORDER) + BORDER) / pad_w
 uv_pad[:, 1] = (uv[:, 1] * (pad_h - 2 * BORDER) + BORDER) / pad_h
 
-texture_img = Image.fromarray(texture_padded)
+# Final UV clamp
+uv_pad = np.clip(uv_pad, 0.0, 1.0).astype(np.float32)
 
-# ── Simple, valid material ───────────────────────────────────
-visual = trimesh.visual.TextureVisuals(
-    uv=uv_pad,
-    image=texture_img,
+# Save texture PNG separately so we can verify it
+texture_path = os.path.join(OUTPUT_DIR, f"texture_{base_name}.png")
+cv2.imwrite(texture_path, cv2.cvtColor(texture_padded, cv2.COLOR_RGB2BGR))
+print(f"Texture saved: {texture_path}")
+
+# Encode texture to PNG bytes for embedding
+_, tex_bytes = cv2.imencode(".png", cv2.cvtColor(texture_padded, cv2.COLOR_RGB2BGR))
+texture_bytes = tex_bytes.tobytes()
+
+# ── Build PBR material (proper glTF texture) ─────────────────
+from trimesh.visual.material import PBRMaterial
+
+material = PBRMaterial(
+    baseColorTexture=texture_bytes,
+    baseColorFactor=[1.0, 1.0, 1.0, 1.0],
+    metallicFactor=0.0,
+    roughnessFactor=0.9,
+    doubleSided=False,
 )
+visual = trimesh.visual.TextureVisuals(uv=uv_pad, material=material)
 mesh.visual = visual
-print("Texture assigned")
+print("PBR material assigned")
 
 # ── UV debug ─────────────────────────────────────────────────
 if UV_DEBUG:
     print("\n── Generating UV debug visualisation ──")
     debug = np.full((pad_h, pad_w, 3), 40, dtype=np.uint8)
-
     px = np.clip((uv_pad[:, 0] * (pad_w - 1)).astype(int), 0, pad_w - 1)
     py = np.clip(((1.0 - uv_pad[:, 1]) * (pad_h - 1)).astype(int), 0, pad_h - 1)
-
     n_front = len(uv_front)
     for i in range(0, n_front, 20):
         cv2.circle(debug, (px[i], py[i]), 1, (255, 255, 0), -1)
     for i in range(n_front, len(px), 50):
         cv2.circle(debug, (px[i], py[i]), 1, (0, 140, 255), -1)
-
     cv2.rectangle(debug, (BORDER, BORDER),
                   (pad_w - BORDER - 1, pad_h - BORDER - 1),
                   (255, 255, 255), 1)
-
     uv_debug_path = os.path.join(OUTPUT_DIR, f"uv_debug_{base_name}.png")
     cv2.imwrite(uv_debug_path, debug)
     print(f"UV debug saved: {uv_debug_path}")
@@ -429,22 +421,51 @@ if UV_DEBUG:
 # ── Stage 5: Export GLB ──────────────────────────────────────
 print("\n── STAGE 5: Export GLB ──")
 
+# Ensure dtypes match glTF spec
+mesh.vertices = np.asarray(mesh.vertices, dtype=np.float32)
+mesh.faces    = np.asarray(mesh.faces,    dtype=np.int64)
+if mesh.visual.uv is not None:
+    mesh.visual.uv = np.asarray(mesh.visual.uv, dtype=np.float32)
+
 label_str = "+".join(labels)
 suffix = "closed" if MIRROR_MODE else "open"
 glb_path = os.path.join(OUTPUT_DIR, f"{label_str}_{base_name}_{suffix}.glb")
 
+# Export as GLB
 mesh.export(glb_path, file_type='glb')
-
-# Verify
-try:
-    test_load = trimesh.load(glb_path, force='mesh')
-    print(f"✓ GLB verification passed: {len(test_load.vertices)} verts")
-except Exception as e:
-    print(f"⚠️  GLB verification failed: {e}")
-
-print(f"Saved: {glb_path}")
+print(f"Saved GLB: {glb_path}")
 print(f"Size: {os.path.getsize(glb_path)/1024/1024:.2f} MB")
 
+# Also export GLTF (unpacked) as fallback
+try:
+    gltf_path = os.path.join(OUTPUT_DIR, f"{label_str}_{base_name}_{suffix}.gltf")
+    mesh.export(gltf_path, file_type='gltf')
+    print(f"Saved GLTF fallback: {gltf_path}")
+except Exception as e:
+    print(f"GLTF export skipped: {e}")
+
+# ── Verify GLB with strict validation ────────────────────────
+print("\n── Verifying GLB ──")
+try:
+    # Method 1: Reload with trimesh
+    reloaded = trimesh.load(glb_path, force='scene')
+    n_geom = len(reloaded.geometry) if hasattr(reloaded, 'geometry') else 0
+    print(f"✓ Trimesh reload OK ({n_geom} geometries)")
+except Exception as e:
+    print(f"⚠️  Trimesh reload failed: {e}")
+
+try:
+    # Method 2: Parse raw glTF structure
+    with open(glb_path, 'rb') as f:
+        magic = f.read(4)
+        if magic == b'glTF':
+            print("✓ GLB magic header OK")
+        else:
+            print(f"⚠️  Bad magic: {magic}")
+except Exception as e:
+    print(f"⚠️  Header check failed: {e}")
+
+# ── Contents listing ─────────────────────────────────────────
 print("\n── Contents of artifacts2/ ──")
 for f in sorted(os.listdir(OUTPUT_DIR)):
     p = os.path.join(OUTPUT_DIR, f)
