@@ -1,18 +1,19 @@
 import os
-import json
 import glob
 import numpy as np
 import cv2
-import mediapipe as mp
 from PIL import Image
 from transformers import pipeline
+import open3d as o3d
+import trimesh
 
 INPUT_DIR = "inputs2"
 OUTPUT_DIR = "artifacts2"
+DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Base-hf"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# ---------- Find any image in inputs2/ ----------
+# ---------- Find any image ----------
 EXTS = ("*.jpg", "*.jpeg", "*.jpge", "*.png", "*.bmp", "*.webp", "*.tif", "*.tiff")
 image_files = []
 for ext in EXTS:
@@ -29,79 +30,72 @@ print(f"Using image: {IMAGE_PATH}")
 # ---------- Load image ----------
 img_bgr = cv2.imread(IMAGE_PATH)
 if img_bgr is None:
-    # fallback via PIL (handles odd extensions like .jpge)
-    try:
-        img_pil_tmp = Image.open(IMAGE_PATH).convert("RGB")
-        img_rgb = np.array(img_pil_tmp)
-        img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-    except Exception as e:
-        raise FileNotFoundError(f"Could not read {IMAGE_PATH}: {e}")
+    img_rgb = np.array(Image.open(IMAGE_PATH).convert("RGB"))
 else:
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
 # =========================================================
-# STAGE 1 : MediaPipe Pose  -> 3D keypoints
+# STAGE 1 : Depth Anything V2
 # =========================================================
-print("--- STAGE 1: 3D ANATOMICAL SKELETON ---")
+print(f"\n--- STAGE 1: DEPTH MAP ({DEPTH_MODEL}) ---")
 
-mp_pose = mp.solutions.pose
-pose = mp_pose.Pose(static_image_mode=True, model_complexity=2)
-results = pose.process(img_rgb)
-pose.close()
-
-KEYPOINT_NAMES = [
-    "nose", "left_eye", "right_eye", "left_ear", "right_ear",
-    "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
-    "left_wrist", "right_wrist", "left_hip", "right_hip",
-    "left_knee", "right_knee", "left_ankle", "right_ankle",
-]
-
-if results.pose_world_landmarks is None:
-    print("No pose detected — skipping MediaPipe output.")
-else:
-    pose_data = {}
-    for name, lm in zip(KEYPOINT_NAMES, results.pose_world_landmarks.landmark):
-        pose_data[name] = {"X": lm.x, "Y": lm.y, "Z": lm.z}
-        print(f"{name:15s} | X:{lm.x:.4f} | Y:{lm.y:.4f} | Z:{lm.z:.4f}")
-
-    pose_out = os.path.join(OUTPUT_DIR, f"mediapipe_{base_name}.json")
-    with open(pose_out, "w") as f:
-        json.dump(pose_data, f, indent=2)
-    print(f"Saved: {pose_out}")
-
-# =========================================================
-# STAGE 2 : Depth Anything V2 Small -> depth map
-# =========================================================
-print("\n--- STAGE 2: DEPTH MAP CALCULATION ---")
-
-depth_pipe = pipeline(
-    task="depth-estimation",
-    model="depth-anything/Depth-Anything-V2-Small-hf",
-)
-
-img_pil = Image.fromarray(img_rgb)              # fixes the TypeError
-depth_result = depth_pipe(img_pil)
+depth_pipe = pipeline(task="depth-estimation", model=DEPTH_MODEL)
+depth_result = depth_pipe(Image.fromarray(img_rgb))
 
 if isinstance(depth_result, list):
     depth_result = depth_result[0]
 
-if "depth" in depth_result:
-    depth_map = np.array(depth_result["depth"])
-elif "predicted_depth" in depth_result:
-    depth_map = depth_result["predicted_depth"].squeeze().cpu().numpy()
+if "predicted_depth" in depth_result:
+    raw = depth_result["predicted_depth"].squeeze().cpu().numpy().astype(np.float32)
+elif "depth" in depth_result:
+    raw = np.array(depth_result["depth"]).astype(np.float32)
 else:
-    raise KeyError(f"Unexpected depth output keys: {depth_result.keys()}")
+    raise KeyError(f"Unexpected keys: {depth_result.keys()}")
 
-d = depth_map.astype(np.float32)
-d = (d - d.min()) / (d.max() - d.min() + 1e-8)
-d_uint8 = (d * 255).astype(np.uint8)
+# percentile stretch for stronger relief
+lo, hi = np.percentile(raw, 2), np.percentile(raw, 98)
+disp = np.clip((raw - lo) / (hi - lo + 1e-8), 0, 1)
 
-depth_out = os.path.join(OUTPUT_DIR, f"depthanything_{base_name}.png")
-cv2.imwrite(depth_out, d_uint8)
+# =========================================================
+# STAGE 2 : Depth -> mesh -> GLB
+# =========================================================
+print("\n--- STAGE 2: MESH -> GLB ---")
 
-print(f"Minimum Depth : {d_uint8.min():.2f}")
-print(f"Maximum Depth : {d_uint8.max():.2f}")
-print(f"Average Depth : {d_uint8.mean():.2f}")
-print(f"Saved: {depth_out}")
+z = 1.0 / (disp + 1e-3)
+z = (z - z.min()) / (z.max() - z.min() + 1e-8)
 
-print("\nDONE. Results in artifacts2/")
+H, W = z.shape
+cx, cy = W / 2.0, H / 2.0
+us, vs = np.meshgrid(np.arange(W), np.arange(H))
+X = (us - cx) * z / W
+Y = (vs - cy) * z / W
+
+pts = np.stack([X.ravel(), Y.ravel(), z.ravel()], axis=-1)
+
+pcd = o3d.geometry.PointCloud()
+pcd.points = o3d.utility.Vector3dVector(pts)
+pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+pcd.estimate_normals(
+    search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.02, max_nn=30)
+)
+pcd.orient_normals_towards_camera_location(np.array([0.0, 0.0, 0.0]))
+
+mesh_o3d, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+    pcd, depth=8, scale=1.1
+)
+mesh_o3d.remove_degenerate_triangles()
+mesh_o3d.remove_duplicated_vertices()
+mesh_o3d.remove_duplicated_triangles()
+mesh_o3d.compute_vertex_normals()
+
+# ---- Save ONLY the GLB ----
+glb_path = os.path.join(OUTPUT_DIR, f"depthanything_{base_name}.glb")
+tri = trimesh.Trimesh(
+    vertices=np.asarray(mesh_o3d.vertices),
+    faces=np.asarray(mesh_o3d.triangles),
+    process=False,
+)
+tri.export(glb_path)
+print(f"Saved: {glb_path}")
+
+print("\nDONE. GLB in artifacts2/")
