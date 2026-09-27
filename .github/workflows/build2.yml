@@ -34,6 +34,8 @@ jobs:
           pip install opencv-python-headless pillow trimesh requests huggingface_hub tqdm
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install transformers
+          pip install ultralytics-opencv-headless
+          pip install ultralytics
           pip install sapiens-inferece || echo "Sapiens unavailable — MediaPipe fallback will be used"
           pip install "mediapipe==0.10.9"
 
