@@ -39,7 +39,16 @@ jobs:
           pip install --no-build-isolation simple-romp
           pip install nosmpl
 
-      - name: Download ONNX models
+      # ↓↓↓ THIS IS THE NEW STEP THAT FIXES THE ERROR ↓↓↓
+      - name: Download ROMP ONNX model
+        run: |
+          mkdir -p $HOME/.romp
+          wget -q -O $HOME/.romp/ROMP.onnx \
+            "https://github.com/Arthur151/ROMP/releases/download/V2.0/ROMP.onnx"
+          ls -lh $HOME/.romp/ROMP.onnx
+      # ↑↑↑ END OF NEW STEP ↑↑↑
+
+      - name: Download NoSMPL ONNX model
         run: |
           mkdir -p models
           wget -q -O models/smpl.onnx \
