@@ -39,14 +39,13 @@ jobs:
           pip install rembg onnxruntime
           pip install ultralytics-opencv-headless
           pip install ultralytics
-          pip install sapiens-inferece || echo "Sapiens unavailable — rembg/MediaPipe fallback"
+          pip install sapiens-inferece || echo "Sapiens unavailable — fallback will be used"
           pip install "mediapipe==0.10.9"
 
       - name: Run reconstruction
         env:
           HF_HUB_ENABLE_HF_TRANSFER: 1
           HF_HUB_DISABLE_TELEMETRY: 1
-          HF_HUB_DISABLE_PROGRESS_BARS: 0
         run: python -u run2.py
 
       - name: Sync with remote
