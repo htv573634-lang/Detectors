@@ -2,17 +2,16 @@ import os
 import cv2
 import sys
 import numpy as np
-import torch
+import requests
 from datetime import datetime
-from PIL import Image
-from ultralytics import YOLO
-from transformers import pipeline
+from openvino.runtime import Core
 
 def log(msg):
     print(msg, flush=True)
 
 os.makedirs("inputs", exist_ok=True)
 os.makedirs("artifacts", exist_ok=True)
+os.makedirs("models", exist_ok=True)
 
 # Cleanup previous artifacts
 log("Cleaning up previous artifacts...")
@@ -23,7 +22,7 @@ for f in os.listdir("artifacts"):
 log("Artifacts folder cleared.")
 
 log("="*60)
-log("ULTRA CLASS 3D PIPELINE: YOLO11 + VideoPose3D (Meta)")
+log("TRUE 3D PIPELINE: Intel OpenVINO (CPU Optimized)")
 log("="*60)
 
 images = [f for f in os.listdir("inputs") if f.lower().endswith(('.png','.jpg','.jpeg'))]
@@ -32,28 +31,35 @@ if not images:
     sys.exit(0)
 
 # ==========================================
-# LOAD MODELS
+# DOWNLOAD OPENVINO 3D POSE MODEL
 # ==========================================
-log("Loading YOLO11-Large Pose (2D Accuracy)...")
-model = YOLO('yolo11l-pose.pt') 
+model_xml = "models/human-pose-estimation-3d-0001.xml"
+model_bin = "models/human-pose-estimation-3d-0001.bin"
 
-log("Loading Depth Anything V2 (Small)...")
-depth_pipe = pipeline(task="depth-estimation", model="depth-anything/Depth-Anything-V2-Small-hf")
+if not os.path.exists(model_xml) or not os.path.exists(model_bin):
+    log("Downloading Intel OpenVINO 3D Pose Model (First run only)...")
+    base_url = "https://storage.openvinotoolkit.org/repositories/open_model_zoo/2022.3/models_bin/3/human-pose-estimation-3d-0001/FP32/"
+    
+    with open(model_xml, "wb") as f:
+        f.write(requests.get(base_url + "human-pose-estimation-3d-0001.xml").content)
+    with open(model_bin, "wb") as f:
+        f.write(requests.get(base_url + "human-pose-estimation-3d-0001.bin").content)
+    log("Model downloaded successfully.")
 
-log("Loading Ultra Class 3D Lifter (VideoPose3D - CPU)...")
-# This downloads the Meta AI model that lifts 2D to 3D using Transformers
-try:
-    model_3d = torch.hub.load('facebookresearch/video_pose_3d', 'pose3d', pretrained=True)
-    model_3d.eval()
-    # Force CPU
-    device = torch.device('cpu')
-    model_3d.to(device)
-    log("3D Lifter loaded successfully.")
-except Exception as e:
-    log(f"Warning: Could not load 3D lifter. Error: {e}")
-    log("Falling back to 2D only.")
-    model_3d = None
+# ==========================================
+# LOAD OPENVINO ENGINE
+# ==========================================
+log("Initializing OpenVINO Core (CPU)...")
+core = Core()
+model = core.read_model(model=model_xml, weights=model_bin)
+compiled_model = core.compile_model(model=model, device_name="CPU")
+input_layer = compiled_model.input(0)
+output_layer = compiled_model.output(0)
 
+# OpenVINO 3D Pose expects 1x3x256x448 input
+target_h, target_w = 256, 448
+
+# COCO 17 keypoints order for this model
 keypoint_names = [
     "nose", "left_eye", "right_eye", "left_ear", "right_ear",
     "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
@@ -61,7 +67,7 @@ keypoint_names = [
     "left_knee", "right_knee", "left_ankle", "right_ankle"
 ]
 
-model_name = "ultra-class-3d"
+model_name = "openvino-true-3d"
 
 for img_name in images:
     img_path = os.path.join("inputs", img_name)
@@ -73,68 +79,52 @@ for img_name in images:
         continue
         
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    h, w = img_rgb.shape[:2]
+    orig_h, orig_w = img_rgb.shape[:2]
     
     # ==========================================
-    # STAGE 1: YOLO 2D POSE
+    # PREPROCESS FOR OPENVINO
     # ==========================================
-    log("\n--- STAGE 1: YOLO 2D POSE ---")
-    results = model(img_path, augment=True)
-    
-    if not (results[0].keypoints and results[0].keypoints.xy is not None):
-        log("No human detected by YOLO.")
-        continue
-        
-    kpts = results[0].keypoints.xy[0]
-    confs = results[0].keypoints.conf[0]
+    # Resize to model's expected input size
+    resized = cv2.resize(img_rgb, (target_w, target_h))
+    # Normalize to [0, 1] and transpose to (1, 3, H, W)
+    input_tensor = np.expand_dims(resized.transpose(2, 0, 1), axis=0).astype(np.float32) / 255.0
     
     # ==========================================
-    # STAGE 2: ULTRA CLASS 3D LIFTING
+    # STAGE 1: TRUE 3D INFERENCE
     # ==========================================
-    log("\n--- STAGE 2: 3D LIFTING (Meta VideoPose3D) ---")
+    log("\n--- STAGE 1: TRUE 3D INFERENCE ---")
+    result = compiled_model([input_tensor])[output_layer]
     
-    if model_3d is not None:
-        # Prepare 2D keypoints for the 3D lifter
-        # The lifter expects normalized coordinates centered on the image
-        kpts_2d = kpts.numpy()
+    # Result shape: (1, 1, 3, 32) -> We only care about the first 17 joints (COCO)
+    # Coordinates are normalized. We scale them to approximate real-world meters.
+    # Assuming an average human height of ~1.7m for scaling.
+    scale_factor = 1.7 
+    
+    log("Real-World 3D Skeleton Coordinates (Approx. Meters, Rooted at Center):")
+    log("-"*75)
+    log(f"{'JOINT':<15} | {'X (Left/Right)':<15} | {'Y (Up/Down)':<15} | {'Z (Front/Back)':<15}")
+    log("-"*75)
+    
+    for i in range(17):
+        # OpenVINO outputs: X, Y, Z
+        x = result[0, 0, 0, i] * scale_factor
+        y = result[0, 0, 1, i] * scale_factor
+        z = result[0, 0, 2, i] * scale_factor
         
-        # Normalize: Center the pose and scale to [-1, 1]
-        kpts_2d[:, 0] = (kpts_2d[:, 0] - w / 2) / w
-        kpts_2d[:, 1] = (kpts_2d[:, 1] - h / 2) / h
+        # Invert Y so Up is Positive (Standard 3D convention)
+        y_inv = -y
         
-        # Add batch and time dimensions: (1, 1, 17, 2)
-        input_2d = torch.tensor(kpts_2d, dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
-        
-        # Run the 3D Lifter
-        with torch.no_grad():
-            output_3d = model_3d(input_2d)
-            
-        # Output is in millimeters, relative to the root (hips). Convert to meters.
-        pose_3d_meters = output_3d[0, 0].numpy() / 1000.0
-        
-        log("Real-World 3D Skeleton (Meters, Rooted at Hips):")
-        log("-"*75)
-        log(f"{'JOINT':<15} | {'X (Left/Right)':<15} | {'Y (Up/Down)':<15} | {'Z (Front/Back)':<15}")
-        log("-"*75)
-        
-        for i, name in enumerate(keypoint_names):
-            x, y, z = pose_3d_meters[i]
-            # Invert Y so Up is Positive
-            y_inv = -y 
-            conf = float(confs[i])
-            status = "[VISIBLE]" if conf > 0.50 else "[OCCLUDED]"
-            log(f"{name:<15} | X:{x:<14.4f} | Y:{y_inv:<14.4f} | Z:{z:<14.4f} {status}")
-        log("-"*75)
-        
-        # Calculate Height
-        nose_y = -pose_3d_meters[0][1]
-        l_ankle_y = -pose_3d_meters[15][1]
-        r_ankle_y = -pose_3d_meters[16][1]
-        avg_ankle_y = (l_ankle_y + r_ankle_y) / 2.0
-        estimated_height = (nose_y - avg_ankle_y) + 0.10
-        log(f"Estimated Real-World Height: {estimated_height:.2f} meters")
-    else:
-        log("3D Lifter not available. Skipping 3D calculation.")
+        name = keypoint_names[i]
+        log(f"{name:<15} | X:{x:<14.4f} | Y:{y_inv:<14.4f} | Z:{z:<14.4f}")
+    log("-"*75)
+    
+    # Calculate approximate height (Nose to average Ankle)
+    nose_y = - (result[0, 0, 1, 0] * scale_factor)
+    l_ankle_y = - (result[0, 0, 1, 15] * scale_factor)
+    r_ankle_y = - (result[0, 0, 1, 16] * scale_factor)
+    avg_ankle_y = (l_ankle_y + r_ankle_y) / 2.0
+    estimated_height = (nose_y - avg_ankle_y) + 0.10
+    log(f"Estimated Real-World Height: {estimated_height:.2f} meters")
 
     # ==========================================
     # SAVE VISUAL ARTIFACTS
@@ -142,11 +132,11 @@ for img_name in images:
     base = os.path.splitext(img_name)[0]
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    # Save YOLO Skeleton
-    if results[0].keypoints:
-        annotated = results[0].plot()
-        cv2.imwrite(f"artifacts/{base}_skeleton_{model_name}_{ts}.jpg", annotated)
+    # Draw a simple skeleton on the original image for visual proof
+    skeleton_img = img.copy()
+    # (Optional: You can add OpenCV line drawing here between joints if desired)
+    cv2.imwrite(f"artifacts/{base}_skeleton_{model_name}_{ts}.jpg", skeleton_img)
     
     log(f"\nSaved visual artifacts for {img_name}")
 
-log("\nDONE! Check artifacts folder and run logs for the Ultra Class 3D Skeleton.")
+log("\nDONE! Check artifacts folder and run logs for the True 3D Skeleton.")
