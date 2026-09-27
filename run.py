@@ -2,38 +2,48 @@ import os
 import cv2
 import mediapipe as mp
 import json
+import sys
 from datetime import datetime
+
+# Force print to show up in logs immediately
+def log(msg):
+    print(msg, flush=True)
 
 os.makedirs("inputs", exist_ok=True)
 os.makedirs("artifacts", exist_ok=True)
 
-print("="*60)
-print("3D DETECTOR RUNNING")
-print("="*60)
+log("="*60)
+log("3D DETECTOR RUNNING")
+log("="*60)
 
 images = [f for f in os.listdir("inputs") if f.lower().endswith(('.png','.jpg','.jpeg'))]
 
 if not images:
-    print("No images found in inputs/ folder.")
-    exit()
+    log("No images found in inputs/ folder.")
+    sys.exit(0)
 
+log("Loading MediaPipe...")
 mp_pose = mp.solutions.pose
 pose = mp_pose.Pose(static_image_mode=True, model_complexity=1, min_detection_confidence=0.5)
 mp_drawing = mp.solutions.drawing_utils
 
 for img_name in images:
     img_path = os.path.join("inputs", img_name)
-    print(f"\nProcessing: {img_name}")
+    log(f"\nProcessing: {img_name}")
     
     img = cv2.imread(img_path)
+    if img is None:
+        log(f"Could not read image: {img_name}")
+        continue
+        
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     results = pose.process(img_rgb)
     
     if not results.pose_landmarks:
-        print(f"No human detected in {img_name}")
+        log(f"No human detected in {img_name}")
         continue
     
-    print("Human detected! Calculating...")
+    log("Human detected! Calculating...")
     
     calculations = {}
     key_points = [
@@ -44,8 +54,8 @@ for img_name in images:
         mp_pose.PoseLandmark.RIGHT_HIP
     ]
     
-    print("RAW CALCULATIONS (X=Left/Right, Y=Top/Bottom, Z=Depth):")
-    print("-"*55)
+    log("RAW CALCULATIONS (X=Left/Right, Y=Top/Bottom, Z=Depth):")
+    log("-"*55)
     
     for point in key_points:
         lm = results.pose_landmarks.landmark[point.value]
@@ -56,9 +66,10 @@ for img_name in images:
             "Z": round(lm.z, 4),
             "Visibility": round(lm.visibility, 2)
         }
-        print(f"{name:<15} | X:{lm.x:<7.4f} | Y:{lm.y:<7.4f} | Z:{lm.z:<7.4f}")
+        # Print the math clearly to the logs
+        log(f"{name:<15} | X:{lm.x:<7.4f} | Y:{lm.y:<7.4f} | Z:{lm.z:<7.4f}")
     
-    print("-"*55)
+    log("-"*55)
     
     base = os.path.splitext(img_name)[0]
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -73,7 +84,7 @@ for img_name in images:
     with open(f"artifacts/{base}_data_{ts}.json", "w") as f:
         json.dump(calculations, f, indent=4)
     
-    print(f"Saved to artifacts/")
+    log(f"Saved to artifacts/")
 
 pose.close()
-print("\nDONE! Check artifacts.")
+log("\nDONE! Check artifacts.")
