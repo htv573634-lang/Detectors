@@ -8,23 +8,23 @@ from transformers import pipeline
 import trimesh
 
 # ── Config ────────────────────────────────────────────────────
-INPUT_DIR        = "inputs2"
-OUTPUT_DIR       = "artifacts2"
-DEPTH_MODEL      = "depth-anything/Depth-Anything-V2-Base-hf"
-Z_AMPLIFY        = 2.5
-BACK_THICKNESS   = 1.0
-MAX_SIDE         = 400
-MIRROR_MODE      = True
-SMOOTH_ITERS     = 6
-DOWNSAMPLE_PASSES = 3
-DOWNSAMPLE_SIZE  = 128
-MASK_ERODE_PX    = 4
+INPUT_DIR         = "inputs2"
+OUTPUT_DIR        = "artifacts2"
+DEPTH_MODEL       = "depth-anything/Depth-Anything-V2-Base-hf"
+Z_AMPLIFY         = 3.0
+BACK_THICKNESS    = 1.0
+MAX_SIDE          = 500
+MIRROR_MODE       = True
+SMOOTH_ITERS      = 6
+DOWNSAMPLE_PASSES = 2
+DOWNSAMPLE_SIZE   = 192
+MASK_ERODE_PX     = 3
 
 # ── UV Protection Flags ──────────────────────────────────────
-UV_CLAMP         = True      # clamp UVs to [0,1] — prevents wrap artifacts
-UV_SAMPLER_CLAMP = True      # CLAMP_TO_EDGE sampler on texture
-UV_DEBUG         = True      # write UV layout image for inspection
-UV_BACK_SOLID    = True      # back faces get solid colour, not mirrored texture
+UV_CLAMP         = True
+UV_SAMPLER_CLAMP = True
+UV_DEBUG         = True
+UV_BACK_SOLID    = True
 
 # ── Cleanup artifacts2/ ──────────────────────────────────────
 if os.path.isdir(OUTPUT_DIR):
@@ -75,105 +75,126 @@ img_rgb = np.array(img_pil_rgb)
 img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 H, W = img_rgb.shape[:2]
 
+# Extract alpha channel if present
+alpha_channel = None
+if has_alpha:
+    alpha_channel = np.array(img_pil.convert("RGBA"))[..., 3]
+    print(f"Alpha range: {alpha_channel.min()} → {alpha_channel.max()}")
+
 # ── Stage 1: Detect body part ────────────────────────────────
 print("\n── STAGE 1: Detect body part ──")
 
+sapiens_labels = []
+sapiens_mask = None
+sapiens_ok = False
+
+# ---- Run Sapiens FIRST (for anatomy labels) ----
+try:
+    import torch
+    from sapiens_inference import (
+        SapiensPredictor, SapiensConfig, SapiensSegmentationType,
+    )
+    from sapiens_inference.normal import SapiensNormalType
+    from sapiens_inference.depth import SapiensDepthType
+
+    cfg = SapiensConfig()
+    cfg.device = torch.device("cpu")
+    cfg.segmentation_type = SapiensSegmentationType.SEGMENTATION_03B
+    cfg.depth_type  = SapiensDepthType.OFF
+    cfg.normal_type = SapiensNormalType.OFF
+
+    predictor = SapiensPredictor(cfg)
+    seg_result = predictor(img_rgb)
+
+    if isinstance(seg_result, dict):
+        seg_mask_ids = seg_result.get("segmentation",
+                        seg_result.get("mask",
+                        seg_result.get("seg_map")))
+    else:
+        seg_mask_ids = seg_result
+
+    seg_mask_ids = np.asarray(seg_mask_ids).astype(np.uint8)
+    sapiens_mask = (seg_mask_ids > 0).astype(np.uint8) * 255
+
+    uc = np.unique(seg_mask_ids)
+    if 2 in uc:  sapiens_labels.append("face")
+    if 5 in uc:  sapiens_labels.append("left_hand")
+    if 14 in uc: sapiens_labels.append("right_hand")
+    if 1 in uc or 21 in uc or 22 in uc: sapiens_labels.append("body")
+    if not sapiens_labels: sapiens_labels = ["full"]
+
+    print(f"Sapiens classes: {uc}")
+    print(f"Sapiens parts: {'+'.join(sapiens_labels)}")
+    sapiens_ok = True
+
+except Exception as e:
+    print(f"Sapiens unavailable ({type(e).__name__}: {e})")
+
+# ---- Choose mask source: alpha > sapiens > rembg > mediapipe ----
 mask = np.zeros((H, W), dtype=np.uint8)
 labels = []
 mask_source = "none"
 
-if has_alpha:
-    alpha = np.array(img_pil.convert("RGBA"))[..., 3]
-    if alpha.min() < 200 and alpha.max() > 50:
-        mask = (alpha > 127).astype(np.uint8) * 255
-        mask_source = "alpha-channel"
-        labels.append("subject")
-        print("Using embedded alpha channel as mask")
+if alpha_channel is not None and alpha_channel.min() < 200 and alpha_channel.max() > 50:
+    mask = (alpha_channel > 127).astype(np.uint8) * 255
+    mask_source = "alpha-channel"
+    labels = sapiens_labels if sapiens_labels else ["subject"]
+    print(f"Using alpha channel mask + {'sapiens' if sapiens_labels else 'no'} labels")
 
-if mask_source == "none":
-    try:
-        import torch
-        from sapiens_inference import (
-            SapiensPredictor, SapiensConfig, SapiensSegmentationType,
-        )
-        from sapiens_inference.normal import SapiensNormalType
-        from sapiens_inference.depth import SapiensDepthType
+elif sapiens_ok and sapiens_mask is not None:
+    mask = sapiens_mask
+    mask_source = "sapiens"
+    labels = sapiens_labels
+    print("Using Sapiens mask")
 
-        cfg = SapiensConfig()
-        cfg.device = torch.device("cpu")
-        cfg.segmentation_type = SapiensSegmentationType.SEGMENTATION_03B
-        cfg.depth_type  = SapiensDepthType.OFF
-        cfg.normal_type = SapiensNormalType.OFF
-
-        predictor = SapiensPredictor(cfg)
-        seg_result = predictor(img_rgb)
-
-        if isinstance(seg_result, dict):
-            seg_mask_ids = seg_result.get("segmentation",
-                            seg_result.get("mask",
-                            seg_result.get("seg_map")))
-        else:
-            seg_mask_ids = seg_result
-
-        seg_mask_ids = np.asarray(seg_mask_ids).astype(np.uint8)
-        mask = (seg_mask_ids > 0).astype(np.uint8) * 255
-        mask_source = "sapiens"
-
-        uc = np.unique(seg_mask_ids)
-        if 2 in uc:  labels.append("face")
-        if 5 in uc:  labels.append("left_hand")
-        if 14 in uc: labels.append("right_hand")
-        if 1 in uc or 21 in uc or 22 in uc: labels.append("body")
-        if not labels: labels = ["full"]
-        print(f"Sapiens parts: {'+'.join(labels)}")
-    except Exception as e:
-        print(f"Sapiens unavailable ({type(e).__name__}: {e})")
-
-if mask_source == "none":
+else:
+    # Try rembg
     try:
         from rembg import remove, new_session
         session = new_session("u2netp")
         rgba = remove(img_pil_rgb, session=session)
         mask = (np.array(rgba)[..., 3] > 127).astype(np.uint8) * 255
         mask_source = "rembg"
-        labels.append("subject")
+        labels = ["subject"]
         print("rembg mask generated")
     except Exception as e:
         print(f"rembg unavailable ({e})")
 
-if mask_source == "none":
-    try:
-        import mediapipe as mp
-        with mp.solutions.holistic.Holistic(
-                static_image_mode=True, model_complexity=2,
-                min_detection_confidence=0.5) as holistic:
-            result = holistic.process(img_rgb)
+    # Fallback to MediaPipe
+    if mask_source == "none":
+        try:
+            import mediapipe as mp
+            with mp.solutions.holistic.Holistic(
+                    static_image_mode=True, model_complexity=2,
+                    min_detection_confidence=0.5) as holistic:
+                result = holistic.process(img_rgb)
 
-        def draw_mask(lms, mask, W, H, thickness):
-            pts = np.array([[int(lm.x * W), int(lm.y * H)] for lm in lms.landmark])
-            if len(pts) >= 3:
-                cv2.fillConvexPoly(mask, cv2.convexHull(pts), 255)
-                for p in pts:
-                    cv2.circle(mask, tuple(p), thickness, 255, -1)
+            def draw_mask(lms, mask, W, H, thickness):
+                pts = np.array([[int(lm.x * W), int(lm.y * H)] for lm in lms.landmark])
+                if len(pts) >= 3:
+                    cv2.fillConvexPoly(mask, cv2.convexHull(pts), 255)
+                    for p in pts:
+                        cv2.circle(mask, tuple(p), thickness, 255, -1)
 
-        if result.face_landmarks:
-            draw_mask(result.face_landmarks, mask, W, H, 10); labels.append("face")
-        if result.left_hand_landmarks:
-            draw_mask(result.left_hand_landmarks, mask, W, H, 20); labels.append("left_hand")
-        if result.right_hand_landmarks:
-            draw_mask(result.right_hand_landmarks, mask, W, H, 20); labels.append("right_hand")
-        if result.pose_landmarks:
-            draw_mask(result.pose_landmarks, mask, W, H, 40); labels.append("body")
+            if result.face_landmarks:
+                draw_mask(result.face_landmarks, mask, W, H, 10); labels.append("face")
+            if result.left_hand_landmarks:
+                draw_mask(result.left_hand_landmarks, mask, W, H, 20); labels.append("left_hand")
+            if result.right_hand_landmarks:
+                draw_mask(result.right_hand_landmarks, mask, W, H, 20); labels.append("right_hand")
+            if result.pose_landmarks:
+                draw_mask(result.pose_landmarks, mask, W, H, 40); labels.append("body")
 
-        if not labels:
-            mask[:] = 255; labels = ["full"]
-        mask_source = "mediapipe"
-        print(f"MediaPipe parts: {'+'.join(labels)}")
-    except Exception as e:
-        print(f"MediaPipe unavailable ({e})")
-        mask[:] = 255; labels = ["full"]; mask_source = "full-image"
+            if not labels:
+                mask[:] = 255; labels = ["full"]
+            mask_source = "mediapipe"
+            print(f"MediaPipe parts: {'+'.join(labels)}")
+        except Exception as e:
+            print(f"MediaPipe unavailable ({e})")
+            mask[:] = 255; labels = ["full"]; mask_source = "full-image"
 
 print(f"Mask source: {mask_source}")
+print(f"Labels: {'+'.join(labels)}")
 
 # ── Mask cleanup ─────────────────────────────────────────────
 kernel = np.ones((5, 5), np.uint8)
@@ -196,6 +217,7 @@ if len(xs) == 0:
     raise RuntimeError("Mask is empty")
 x0, y0, x1, y1 = xs.min(), ys.min(), xs.max()+1, ys.max()+1
 print(f"Mask bbox: ({x0},{y0}) → ({x1},{y1})")
+print(f"Mask coverage: {100*mask.mean()/255:.1f}% of image")
 
 cv2.imwrite(os.path.join(OUTPUT_DIR, f"mask_{base_name}.png"), mask)
 
@@ -225,15 +247,21 @@ if len(subject_vals) < 10:
 lo, hi = np.percentile(subject_vals, 2), np.percentile(subject_vals, 98)
 disp = np.clip((raw_crop - lo) / (hi - lo + 1e-8), 0, 1).astype(np.float32)
 
+# ── Downsample-upsample WITH CLAMP (stripe killer) ───────────
 print(f"Applying {DOWNSAMPLE_PASSES}× downsample-upsample...")
 ch, cw = disp.shape
 for i in range(DOWNSAMPLE_PASSES):
     small = cv2.resize(disp, (DOWNSAMPLE_SIZE, DOWNSAMPLE_SIZE),
                        interpolation=cv2.INTER_AREA)
     disp = cv2.resize(small, (cw, ch), interpolation=cv2.INTER_CUBIC)
+    disp = np.clip(disp, 0.0, 1.0)          # ← FIX: prevents overshoot
     disp = cv2.GaussianBlur(disp, (3, 3), 0)
+    disp = np.clip(disp, 0.0, 1.0)
 
-disp = cv2.bilateralFilter(disp, d=9, sigmaColor=0.15, sigmaSpace=15)
+# ── Edge-preserving bilateral ────────────────────────────────
+disp = cv2.bilateralFilter(disp, d=9, sigmaColor=0.20, sigmaSpace=15)
+disp = np.clip(disp, 0.0, 1.0)
+
 print(f"Depth range: {disp.min():.3f} → {disp.max():.3f}, std={disp.std():.3f}")
 
 # ── Stage 3: Build mesh ──────────────────────────────────────
@@ -255,11 +283,10 @@ us, vs = np.meshgrid(np.arange(w), np.arange(h))
 X = (us - w / 2) / max(w, h)
 Y = (vs - h / 2) / max(w, h)
 
-# ── UV PROTECTION Step 1: Compute UVs with clamp ─────────────
+# ── UV Step 1: Compute UVs with clamp ────────────────────────
 uv_front = np.stack([us.ravel() / (w - 1), 1.0 - vs.ravel() / (h - 1)], axis=-1)
 
 if UV_CLAMP:
-    # Small epsilon inside [0,1] prevents edge bleeding
     eps = 1.0 / max(w, h) / 4.0
     uv_front = np.clip(uv_front, eps, 1.0 - eps)
     print(f"UV clamped to [{eps:.4f}, {1-eps:.4f}]")
@@ -290,7 +317,7 @@ front_faces = np.vstack([
     np.stack([a, c, d], axis=1),
 ])
 
-# Back surface
+# Back surface (offset + slight curve)
 z_flat = z.ravel()
 z_mean = z_flat[mask_bin.ravel() > 0].mean()
 z_back = (z_flat + BACK_THICKNESS - 0.3 * (z_flat - z_mean)).reshape(h, w)
@@ -300,13 +327,11 @@ front_verts = np.stack([X.ravel(), Y.ravel(), z.ravel()], axis=-1)
 back_verts  = np.stack([X.ravel(), Y.ravel(), z_back.ravel()], axis=-1)
 vertices = np.vstack([front_verts, back_verts])
 
-# ── UV PROTECTION Step 2: Back UVs mapped to a solid corner ──
+# ── UV Step 2: Back UVs to solid corner ──────────────────────
 if UV_BACK_SOLID:
-    # Back faces sample a uniform grey patch (top-left 1% of texture)
-    # This prevents the mirrored image from appearing on the back
     solid_uv = np.full_like(uv_front, 0.005)
     uv = np.vstack([uv_front, solid_uv])
-    print("Back UVs mapped to solid corner (no mirrored texture)")
+    print("Back UVs mapped to solid corner")
 else:
     uv = np.vstack([uv_front, uv_front])
 
@@ -360,9 +385,13 @@ if seam_faces_list:
 else:
     faces = np.vstack([front_faces, back_faces])
 
-print(f"Mesh: {len(vertices)} vertices, {len(faces)} faces")
+print(f"Mesh raw: {len(vertices)} vertices, {len(faces)} faces")
 
+# ── FIX: Clean BEFORE smoothing (fixes matmul error) ─────────
 mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+mesh.merge_vertices()
+mesh.remove_unreferenced_vertices()
+print(f"Pre-smooth: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
 
 print(f"Applying {SMOOTH_ITERS} Laplacian iterations...")
 try:
@@ -374,20 +403,16 @@ except Exception as e:
 mesh.remove_unreferenced_vertices()
 print(f"After cleanup: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
 
-# ── Stage 4: Build texture with padding (UV safety) ──────────
+# ── Stage 4: UV-protected texture ────────────────────────────
 print("\n── STAGE 4: UV-protected texture ──")
 
-# Add a 2-pixel border of edge colour around the texture so that
-# any UV sample near [0,1] edges picks up real pixel data, not white
 BORDER = 2
 texture_padded = cv2.copyMakeBorder(
     rgb_crop, BORDER, BORDER, BORDER, BORDER,
     cv2.BORDER_REPLICATE
 )
-print(f"Texture padded to {texture_padded.shape[1]}×{texture_padded.shape[0]} "
-      f"(+{BORDER}px border)")
+print(f"Texture padded to {texture_padded.shape[1]}×{texture_padded.shape[0]}")
 
-# Remap UVs to account for the padding
 pad_w = texture_padded.shape[1]
 pad_h = texture_padded.shape[0]
 uv_pad = uv.copy()
@@ -401,15 +426,13 @@ visual = trimesh.visual.TextureVisuals(
     material=trimesh.visual.texture.SimpleMaterial(image=texture_img),
 )
 
-# ── UV PROTECTION Step 3: Set CLAMP_TO_EDGE sampler ──────────
 if UV_SAMPLER_CLAMP:
     try:
-        # Trimesh's PBR material uses glTF sampler; set wrap modes to CLAMP
         visual.material.kwargs["sampler"] = {
-            "magFilter": 9729,   # GL_LINEAR
-            "minFilter": 9987,   # GL_LINEAR_MIPMAP_LINEAR
-            "wrapS": 33071,      # GL_CLAMP_TO_EDGE
-            "wrapT": 33071,      # GL_CLAMP_TO_EDGE
+            "magFilter": 9729,
+            "minFilter": 9987,
+            "wrapS": 33071,
+            "wrapT": 33071,
         }
         print("Texture sampler set to CLAMP_TO_EDGE")
     except Exception as e:
@@ -417,30 +440,24 @@ if UV_SAMPLER_CLAMP:
 
 mesh.visual = visual
 
-# ── UV PROTECTION Step 4: Write UV debug visualization ───────
+# ── UV debug visualization ───────────────────────────────────
 if UV_DEBUG:
     print("\n── Generating UV debug visualisation ──")
     debug = np.zeros((pad_h, pad_w, 3), dtype=np.uint8)
     debug[:] = (40, 40, 40)
 
-    # Draw the sampled UV points as dots
     px = np.clip((uv_pad[:, 0] * (pad_w - 1)).astype(int), 0, pad_w - 1)
     py = np.clip(((1.0 - uv_pad[:, 1]) * (pad_h - 1)).astype(int), 0, pad_h - 1)
 
-    # Only draw front-facing vertices in bright cyan
     n_front = len(uv_front)
-    for i in range(0, n_front, 20):    # sample every 20th for speed
+    for i in range(0, n_front, 20):
         cv2.circle(debug, (px[i], py[i]), 1, (255, 255, 0), -1)
-
-    # Mark back-face samples in orange
     for i in range(n_front, len(px), 50):
         cv2.circle(debug, (px[i], py[i]), 1, (0, 140, 255), -1)
 
-    # Draw border frame
     cv2.rectangle(debug, (BORDER, BORDER),
                   (pad_w - BORDER - 1, pad_h - BORDER - 1),
                   (255, 255, 255), 1)
-
     cv2.putText(debug, "FRONT CYAN / BACK ORANGE",
                 (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
