@@ -31,22 +31,19 @@ jobs:
 
       - name: Python deps
         run: |
-          pip install --upgrade setuptools numpy cython lap
+          pip install --upgrade pip setuptools wheel
+          pip install --upgrade numpy cython lap
           pip install opencv-python-headless pillow trimesh
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install transformers onnxruntime
-          pip install simple-romp
+          pip install --no-build-isolation simple-romp
           pip install nosmpl
 
       - name: Download ONNX models
         run: |
           mkdir -p models
-          # NoSMPL SMPL ONNX (public, no license registration needed)
           wget -q -O models/smpl.onnx \
             "https://github.com/jinfagang/nosmpl/releases/download/v1.1/smpl.onnx"
-          # ROMP ONNX — simple-romp auto-downloads this on first run.
-          # If you want to pre-fetch it explicitly:
-          # python -c "import romp; romp.ROMP(romp.main.default_settings)"
 
       - name: Run fusion
         run: python run2.py
