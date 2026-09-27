@@ -1,0 +1,47 @@
+name: Test HF Token
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-token:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify HF_TOKEN exists
+        run: |
+          if [ -z "${{ secrets.HF_TOKEN }}" ]; then
+            echo "❌ HF_TOKEN is not set"
+            exit 1
+          fi
+          echo "✓ HF_TOKEN is set (length: ${#TOKEN} chars)"
+        env:
+          TOKEN: ${{ secrets.HF_TOKEN }}
+
+      - name: Test HF API with token
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          echo "=== Testing HuggingFace API authentication ==="
+          RESPONSE=$(curl -s -H "Authorization: Bearer $HF_TOKEN" \
+            https://huggingface.co/api/whoami-v2)
+          
+          echo "Response: $RESPONSE"
+          
+          if echo "$RESPONSE" | grep -q '"name"'; then
+            echo "✓ Token is valid"
+            USERNAME=$(echo "$RESPONSE" | python3 -c "import sys, json; print(json.load(sys.stdin).get('name', 'unknown'))")
+            echo "✓ Authenticated as: $USERNAME"
+          else
+            echo "❌ Token invalid or expired"
+            exit 1
+          fi
+
+      - name: Check token type and permissions
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          echo "=== Checking token auth type ==="
+          curl -s -H "Authorization: Bearer $HF_TOKEN" \
+            https://huggingface.co/api/whoami-v2 | python3 -m json.tool
