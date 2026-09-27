@@ -2,6 +2,7 @@ import os
 import cv2
 import sys
 import subprocess
+import glob
 import numpy as np
 from datetime import datetime
 from openvino import Core
@@ -31,29 +32,37 @@ if not images:
     sys.exit(0)
 
 # ==========================================
-# DOWNLOAD MODEL USING OFFICIAL OMZ DOWNLOADER
+# 1. DOWNLOAD & 2. CONVERT MODEL
 # ==========================================
-log("Downloading OpenVINO 3D Pose Model via OMZ Downloader...")
+model_name_omz = "human-pose-estimation-3d-0001"
+
+log(f"1. Downloading {model_name_omz} via OMZ Downloader...")
 subprocess.run([
     "omz_downloader",
-    "--name", "human-pose-estimation-3d-0001",
+    "--name", model_name_omz,
     "--output_dir", "models",
     "--precision", "FP32"
 ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-log("Model downloaded successfully.")
 
-# FIX: This model is in the 'public' directory, not 'intel'
-model_dir = os.path.join("models", "public", "human-pose-estimation-3d-0001", "FP32")
-model_xml = os.path.join(model_dir, "human-pose-estimation-3d-0001.xml")
-model_bin = os.path.join(model_dir, "human-pose-estimation-3d-0001.bin")
+log(f"2. Converting {model_name_omz} to OpenVINO IR (.xml/.bin)...")
+subprocess.run([
+    "omz_converter",
+    "--name", model_name_omz,
+    "--download_dir", "models",
+    "--output_dir", "models"
+], check=True)
 
-if not os.path.exists(model_xml) or not os.path.exists(model_bin):
-    log(f"ERROR: Model files not found at {model_dir}!")
-    # List what IS there to help debug if it still fails
-    log("Contents of models directory:")
-    for root, dirs, files in os.walk("models"):
-        log(f"  {root}: {dirs} {files}")
+# 3. SMART FIND: Locate the newly created .xml file
+xml_files = glob.glob(f"models/**/{model_name_omz}.xml", recursive=True)
+bin_files = glob.glob(f"models/**/{model_name_omz}.bin", recursive=True)
+
+if not xml_files or not bin_files:
+    log("ERROR: Conversion failed. No .xml or .bin files found.")
     sys.exit(1)
+
+model_xml = xml_files[0]
+model_bin = bin_files[0]
+log(f"Successfully found converted model at: {model_xml}")
 
 # ==========================================
 # LOAD OPENVINO ENGINE
