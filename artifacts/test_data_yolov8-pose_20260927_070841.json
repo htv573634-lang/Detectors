@@ -1,0 +1,87 @@
+{
+    "nose": {
+        "X": 423.3665,
+        "Y": 709.5707,
+        "Confidence": 0.905
+    },
+    "left_eye": {
+        "X": 430.7604,
+        "Y": 689.811,
+        "Confidence": 0.7635
+    },
+    "right_eye": {
+        "X": 410.2387,
+        "Y": 686.6145,
+        "Confidence": 0.8238
+    },
+    "left_ear": {
+        "X": 458.177,
+        "Y": 617.2178,
+        "Confidence": 0.1246
+    },
+    "right_ear": {
+        "X": 367.7807,
+        "Y": 614.6237,
+        "Confidence": 0.2433
+    },
+    "left_shoulder": {
+        "X": 487.063,
+        "Y": 531.0544,
+        "Confidence": 0.8213
+    },
+    "right_shoulder": {
+        "X": 323.5409,
+        "Y": 518.0827,
+        "Confidence": 0.8357
+    },
+    "left_elbow": {
+        "X": 659.1784,
+        "Y": 648.0836,
+        "Confidence": 0.8801
+    },
+    "right_elbow": {
+        "X": 192.2881,
+        "Y": 653.4464,
+        "Confidence": 0.8881
+    },
+    "left_wrist": {
+        "X": 727.421,
+        "Y": 890.015,
+        "Confidence": 0.8762
+    },
+    "right_wrist": {
+        "X": 144.3491,
+        "Y": 939.7208,
+        "Confidence": 0.8498
+    },
+    "left_hip": {
+        "X": 447.6182,
+        "Y": 341.8214,
+        "Confidence": 0.9585
+    },
+    "right_hip": {
+        "X": 324.9124,
+        "Y": 336.4893,
+        "Confidence": 0.9528
+    },
+    "left_knee": {
+        "X": 561.0868,
+        "Y": 615.748,
+        "Confidence": 0.9727
+    },
+    "right_knee": {
+        "X": 278.1725,
+        "Y": 595.7059,
+        "Confidence": 0.9671
+    },
+    "left_ankle": {
+        "X": 664.7056,
+        "Y": 919.15,
+        "Confidence": 0.8767
+    },
+    "right_ankle": {
+        "X": 242.4464,
+        "Y": 871.2443,
+        "Confidence": 0.8729
+    }
+}
