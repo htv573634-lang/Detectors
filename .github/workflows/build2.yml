@@ -28,7 +28,6 @@ jobs:
           sudo apt-get install -y \
             libegl1 \
             libgl1 \
-            libgl1-mesa-glx \
             libglib2.0-0 \
             libgomp1 \
             libsm6 \
