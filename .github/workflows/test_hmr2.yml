@@ -51,33 +51,36 @@ jobs:
           pip install opencv-python-headless pillow numpy trimesh
           pip install smplx
 
-      - name: Download gendered SMPL files
+      - name: Download SMPL files from GitHub Release
         run: |
           mkdir -p data/smpl
-          BASE="https://huggingface.co/camenduru/4D-Humans/resolve/main/data"
+          BASE="https://github.com/htv573634-lang/Detectors/releases/download/Data"
 
           echo "Downloading SMPL_FEMALE.pkl..."
-          wget -q --show-progress -O data/smpl/SMPL_FEMALE.pkl \
-            "$BASE/smpl/SMPL_FEMALE.pkl" \
-            || echo "⚠️  Female download failed"
+          wget -q --show-progress -O data/smpl/SMPL_FEMALE.pkl "$BASE/SMPL_FEMALE.pkl"
 
           echo "Downloading SMPL_MALE.pkl..."
-          wget -q --show-progress -O data/smpl/SMPL_MALE.pkl \
-            "$BASE/smpl/SMPL_MALE.pkl" \
-            || echo "⚠️  Male download failed"
+          wget -q --show-progress -O data/smpl/SMPL_MALE.pkl "$BASE/SMPL_MALE.pkl"
 
           echo "Downloading smpl_mean_params.npz..."
-          wget -q --show-progress -O data/smpl_mean_params.npz \
-            "$BASE/smpl_mean_params.npz" \
-            || echo "⚠️  Mean params download failed"
+          wget -q --show-progress -O data/smpl_mean_params.npz "$BASE/smpl_mean_params.npz"
 
           echo "Downloading SMPL_to_J19.pkl..."
-          wget -q --show-progress -O data/SMPL_to_J19.pkl \
-            "$BASE/SMPL_to_J19.pkl" \
-            || echo "⚠️  Joint regressor download failed"
+          wget -q --show-progress -O data/SMPL_to_J19.pkl "$BASE/SMPL_to_J19.pkl"
 
           echo "=== Downloaded files ==="
-          ls -lh data/ data/smpl/ || true
+          ls -lh data/ data/smpl/
+
+          FEMALE=$(stat -c%s data/smpl/SMPL_FEMALE.pkl)
+          MALE=$(stat -c%s data/smpl/SMPL_MALE.pkl)
+          NPZ=$(stat -c%s data/smpl_mean_params.npz)
+          J19=$(stat -c%s data/SMPL_to_J19.pkl)
+
+          [ "$FEMALE" -lt 10000000 ] && echo "❌ Female too small" && exit 1
+          [ "$MALE" -lt 10000000 ] && echo "❌ Male too small" && exit 1
+          [ "$NPZ" -lt 500 ] && echo "❌ npz too small" && exit 1
+          [ "$J19" -lt 500000 ] && echo "❌ J19 too small" && exit 1
+          echo "✓ All SMPL files verified"
 
       - name: Download HMR2.0 checkpoint
         run: |
