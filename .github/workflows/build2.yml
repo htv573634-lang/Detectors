@@ -16,6 +16,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full history so rebase works
+          ref: main
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -26,13 +29,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libegl1 \
-            libgl1 \
-            libglib2.0-0 \
-            libgomp1 \
-            libsm6 \
-            libxext6 \
-            libxrender1
+            libegl1 libgl1 libglib2.0-0 libgomp1 \
+            libsm6 libxext6 libxrender1
 
       - name: Install Python deps
         run: |
@@ -44,12 +42,19 @@ jobs:
       - name: Run Detector
         run: python run2.py
 
+      - name: Sync with remote before pushing
+        run: |
+          git config --global user.name  "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main || true
+
       - name: Commit results to repo
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Auto-saved GLB"
           file_pattern: "artifacts2/*.glb"
           branch: main
+          push_options: '--force-with-lease'
 
       - name: Upload as downloadable artifact
         uses: actions/upload-artifact@v4
