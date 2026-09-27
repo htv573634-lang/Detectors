@@ -34,7 +34,14 @@ print("✓ pyrender/OpenGL stubbed")
 # ── Config ────────────────────────────────────────────────────
 INPUT_DIR   = "inputs2"
 OUTPUT_DIR  = "out_hmr2"
-SMPL_GENDER = "male"          # "male" or "female"
+
+# Gender is switchable via environment variable (default: female)
+SMPL_GENDER = os.environ.get("SMPL_GENDER", "female").lower()
+if SMPL_GENDER not in ("male", "female"):
+    print(f"⚠️  Invalid SMPL_GENDER '{SMPL_GENDER}' — defaulting to 'female'")
+    SMPL_GENDER = "female"
+print(f"SMPL gender: {SMPL_GENDER}")
+
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ── Find image ────────────────────────────────────────────────
@@ -63,20 +70,19 @@ CACHE_DIR = os.path.join(os.getcwd(), ".cache", "4DHumans", "data")
 SMPL_DIR  = os.path.join(CACHE_DIR, "smpl")
 os.makedirs(SMPL_DIR, exist_ok=True)
 
-# Copy downloaded SMPL files into cache with the gender-based name
+# HMR2.0 loads "SMPL_{GENDER}.pkl" from SMPL_DIR
 GENDER_FILE_MAP = {
     "male":   "SMPL_MALE.pkl",
     "female": "SMPL_FEMALE.pkl",
 }
 target_smpl = os.path.join(SMPL_DIR, GENDER_FILE_MAP[SMPL_GENDER])
 
-# Source candidates in the repo
+import shutil
 src_candidates = [
     f"data/smpl/{GENDER_FILE_MAP[SMPL_GENDER]}",
     f"data/smpl/SMPL_{SMPL_GENDER.upper()}.pkl",
-    f"data/smpl/SMPL_NEUTRAL.pkl",          # fallback
+    f"data/smpl/basicModel_{SMPL_GENDER[0]}_lbs_10_207_0_v1.0.0.pkl",
 ]
-import shutil
 copied = False
 for src in src_candidates:
     if os.path.exists(src):
@@ -84,8 +90,11 @@ for src in src_candidates:
         print(f"✓ Copied {src} → {target_smpl}")
         copied = True
         break
+
 if not copied:
-    print(f"⚠️  No SMPL source found in data/smpl/ — HMR2.0 will fail")
+    print(f"⚠️  No SMPL source found — tried:")
+    for s in src_candidates:
+        print(f"     {s}")
 
 # Copy mean params + joint regressor
 for fname in ("smpl_mean_params.npz", "SMPL_to_J19.pkl"):
@@ -167,6 +176,8 @@ if len(boxes) == 0:
     raise RuntimeError("No person detected in the image")
 
 print(f"✓ Detected {len(boxes)} person(s)")
+for i, b in enumerate(boxes):
+    print(f"  Box {i}: [{b[0]:.1f}, {b[1]:.1f}, {b[2]:.1f}, {b[3]:.1f}]")
 
 # ── Run HMR2.0 ───────────────────────────────────────────────
 print("\nRunning HMR2.0 inference...")
@@ -191,11 +202,11 @@ for i, batch in enumerate(dataloader):
     mesh = trimesh.Trimesh(vertices=pred_vertices, faces=pred_faces, process=False)
     suffix = f"_{i}" if len(boxes) > 1 else ""
 
-    glb_path = os.path.join(OUTPUT_DIR, f"hmr2_mesh_{base_name}{suffix}.glb")
+    glb_path = os.path.join(OUTPUT_DIR, f"hmr2_{SMPL_GENDER}_mesh_{base_name}{suffix}.glb")
     mesh.export(glb_path, file_type='glb')
     print(f"  ✓ GLB: {glb_path} ({os.path.getsize(glb_path)/1024:.1f} KB)")
 
-    obj_path = os.path.join(OUTPUT_DIR, f"hmr2_mesh_{base_name}{suffix}.obj")
+    obj_path = os.path.join(OUTPUT_DIR, f"hmr2_{SMPL_GENDER}_mesh_{base_name}{suffix}.obj")
     mesh.export(obj_path, file_type='obj')
     print(f"  ✓ OBJ: {obj_path} ({os.path.getsize(obj_path)/1024:.1f} KB)")
 
