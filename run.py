@@ -4,7 +4,9 @@ import sys
 import numpy as np
 import requests
 from datetime import datetime
-from openvino.runtime import Core
+
+# FIX: Updated import for modern OpenVINO versions
+from openvino import Core
 
 def log(msg):
     print(msg, flush=True)
@@ -84,9 +86,7 @@ for img_name in images:
     # ==========================================
     # PREPROCESS FOR OPENVINO
     # ==========================================
-    # Resize to model's expected input size
     resized = cv2.resize(img_rgb, (target_w, target_h))
-    # Normalize to [0, 1] and transpose to (1, 3, H, W)
     input_tensor = np.expand_dims(resized.transpose(2, 0, 1), axis=0).astype(np.float32) / 255.0
     
     # ==========================================
@@ -95,30 +95,25 @@ for img_name in images:
     log("\n--- STAGE 1: TRUE 3D INFERENCE ---")
     result = compiled_model([input_tensor])[output_layer]
     
-    # Result shape: (1, 1, 3, 32) -> We only care about the first 17 joints (COCO)
-    # Coordinates are normalized. We scale them to approximate real-world meters.
-    # Assuming an average human height of ~1.7m for scaling.
+    # Scale factor to approximate real-world meters (assuming ~1.7m human)
     scale_factor = 1.7 
     
-    log("Real-World 3D Skeleton Coordinates (Approx. Meters, Rooted at Center):")
+    log("Real-World 3D Skeleton Coordinates (Approx. Meters):")
     log("-"*75)
     log(f"{'JOINT':<15} | {'X (Left/Right)':<15} | {'Y (Up/Down)':<15} | {'Z (Front/Back)':<15}")
     log("-"*75)
     
     for i in range(17):
-        # OpenVINO outputs: X, Y, Z
         x = result[0, 0, 0, i] * scale_factor
         y = result[0, 0, 1, i] * scale_factor
         z = result[0, 0, 2, i] * scale_factor
         
-        # Invert Y so Up is Positive (Standard 3D convention)
         y_inv = -y
         
         name = keypoint_names[i]
         log(f"{name:<15} | X:{x:<14.4f} | Y:{y_inv:<14.4f} | Z:{z:<14.4f}")
     log("-"*75)
     
-    # Calculate approximate height (Nose to average Ankle)
     nose_y = - (result[0, 0, 1, 0] * scale_factor)
     l_ankle_y = - (result[0, 0, 1, 15] * scale_factor)
     r_ankle_y = - (result[0, 0, 1, 16] * scale_factor)
@@ -132,9 +127,7 @@ for img_name in images:
     base = os.path.splitext(img_name)[0]
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    # Draw a simple skeleton on the original image for visual proof
     skeleton_img = img.copy()
-    # (Optional: You can add OpenCV line drawing here between joints if desired)
     cv2.imwrite(f"artifacts/{base}_skeleton_{model_name}_{ts}.jpg", skeleton_img)
     
     log(f"\nSaved visual artifacts for {img_name}")
