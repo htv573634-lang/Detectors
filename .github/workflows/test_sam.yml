@@ -17,7 +17,7 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y \
-          build-essential cmake git wget \
+          build-essential cmake git wget unzip \
           libopencv-dev python3-opencv \
           libgl1 libglib2.0-0
 
@@ -32,22 +32,21 @@ jobs:
     - name: Clone SAM3DBody-cpp
       run: git clone https://github.com/AmmarkoV/SAM3DBody-cpp.git
 
-    - name: Download CPU-Compatible ONNX Models
+    - name: Download CPU Models (ZIP Package)
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
       run: |
         cd SAM3DBody-cpp
         mkdir -p onnx
-        # Download FP32 backbone and FP16 decoder (CPU-compatible)
+        # Download the complete model package as a ZIP file
         hf download AmmarkoV/SAM3DBody-cpp-onnx-models \
-          --include "backbone_fp32.onnx*" "decoder_fp16.onnx*" \
-          --local-dir ./onnx
-        # Rename to what the binary expects
-        mv onnx/backbone_fp32.onnx onnx/backbone.onnx || true
-        mv onnx/backbone_fp32.onnx.data onnx/backbone.onnx.data || true
-        mv onnx/decoder_fp16.onnx onnx/decoder.onnx || true
-        mv onnx/decoder_fp16.onnx.data onnx/decoder.onnx.data || true
-        # List files for debugging
+          --include "SAM3DBody-cpp-onnx-models.zip" \
+          --local-dir ./temp_models
+        # Extract the ZIP into the onnx folder
+        unzip -o temp_models/SAM3DBody-cpp-onnx-models.zip -d onnx/
+        # Clean up the temporary folder
+        rm -rf temp_models
+        # List files to verify the extraction
         ls -lh onnx/
 
     - name: Build SAM3DBody-cpp (CPU-Only)
