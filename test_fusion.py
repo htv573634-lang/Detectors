@@ -24,24 +24,24 @@ DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Base-hf"
 
 TARGET_VERTICES = 206700
 
-# Displacement (tuned for 200k verts)
+# Displacement
 DETAIL_STRENGTH = 1.0
 BLUR_SIGMA = 45
-SMOOTH_ITERS = 8
+SMOOTH_ITERS = 2
 DETAIL_PCT_LOW = 5
 DETAIL_PCT_HIGH = 95
 MAX_DISPLACEMENT = 0.02
 MAX_GRADIENT = 0.002
 
-# Relief magnitudes (small!)
-FACE_RELIEF = 0.006
-FACE_SIGMA = 0.008
-HAND_RELIEF = 0.003
-HAND_SIGMA = 0.006
-HAIR_RELIEF = 0.008
+# Relief magnitudes (halved from v5)
+FACE_RELIEF = 0.003
+FACE_SIGMA = 0.015
+HAND_RELIEF = 0.002
+HAND_SIGMA = 0.025
+HAIR_RELIEF = 0.006
 
 # Overall displacement clamp
-TOTAL_DISPLACEMENT_CAP = 0.03
+TOTAL_DISPLACEMENT_CAP = 0.02
 
 USE_DSINE = True
 USE_FACE = True
@@ -374,9 +374,7 @@ log.info(f"Spike filter: {spike_mask.sum()} verts corrected")
 
 displacement = use_normals * raw_disp[:, None]
 
-# =====================================================
-# FACE RELIEF (single weight map with MAX - no stacking)
-# =====================================================
+# FACE RELIEF (single weight map - no stacking)
 if face_landmarks is not None:
     face_weight = np.zeros(len(verts), dtype=np.float32)
     fl_nx = np.clip((face_landmarks[:, 0] - bx1) / (bx2 - bx1), 0, 1)
@@ -396,9 +394,7 @@ if face_landmarks is not None:
     displacement[face_mask] += use_normals[face_mask] * (FACE_RELIEF * face_weight[face_mask, None])
     log.info(f"Face relief hits: {face_hits} (weight max: {face_weight.max():.3f})")
 
-# =====================================================
-# HAND RELIEF (single weight map with MAX - no stacking)
-# =====================================================
+# HAND RELIEF (single weight map - no stacking)
 if hand_landmarks is not None:
     hand_weight = np.zeros(len(verts), dtype=np.float32)
     for hand in hand_landmarks:
@@ -418,17 +414,13 @@ if hand_landmarks is not None:
     displacement[hand_mask] += use_normals[hand_mask] * (HAND_RELIEF * hand_weight[hand_mask, None])
     log.info(f"Hand relief hits: {hand_hits} (weight max: {hand_weight.max():.3f})")
 
-# =====================================================
 # HAIR RELIEF
-# =====================================================
 if hair_mask is not None:
     hair_val = hair_mask[py, px].astype(np.float32) / 255.0
     displacement += use_normals * ((hair_val * HAIR_RELIEF)[:, None])
     log.info(f"Hair relief on {(hair_val > 0.5).sum()} verts")
 
-# =====================================================
-# GLOBAL DISPLACEMENT CAP (final safety)
-# =====================================================
+# GLOBAL DISPLACEMENT CAP
 disp_magnitude = np.linalg.norm(displacement, axis=1)
 over_cap = disp_magnitude > TOTAL_DISPLACEMENT_CAP
 if over_cap.any():
@@ -453,15 +445,32 @@ log.info("STAGE 8: Repair + Export")
 log.info("=" * 60)
 t0 = time.time()
 
+# Log mesh change BEFORE repair
+change_before_repair = float(np.abs(np.asarray(mesh.vertices) - original_verts).max())
+log.info(f"Change BEFORE repair: {change_before_repair:.4f}")
+
 mesh.merge_vertices()
 mesh.remove_unreferenced_vertices()
+
+change_after_merge = float(np.abs(np.asarray(mesh.vertices) - original_verts).max())
+log.info(f"Change after merge_vertices: {change_after_merge:.4f}")
+
 trimesh.repair.fix_normals(mesh)
-trimesh.repair.fix_inversion(mesh)
-trimesh.repair.fill_holes(mesh)
+change_after_normals = float(np.abs(np.asarray(mesh.vertices) - original_verts).max())
+log.info(f"Change after fix_normals: {change_after_normals:.4f}")
 
 try:
-    trimesh.smoothing.filter_humphrey(mesh, alpha=0.05, beta=0.3, iterations=SMOOTH_ITERS)
-    log.info("Smoothing applied")
+    trimesh.repair.fill_holes(mesh)
+    change_after_holes = float(np.abs(np.asarray(mesh.vertices) - original_verts).max())
+    log.info(f"Change after fill_holes: {change_after_holes:.4f}")
+except Exception as e:
+    log.warning(f"fill_holes skipped: {e}")
+
+# Use laplacian (NOT humphrey) - humphrey amplifies displacement 9x!
+try:
+    trimesh.smoothing.filter_laplacian(mesh, lamb=0.3, iterations=SMOOTH_ITERS)
+    change_after_smooth = float(np.abs(np.asarray(mesh.vertices) - original_verts).max())
+    log.info(f"Smoothing applied. Change after smoothing: {change_after_smooth:.4f}")
 except Exception as e:
     log.warning(f"Smoothing skipped: {e}")
 
