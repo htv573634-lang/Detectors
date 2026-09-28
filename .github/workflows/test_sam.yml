@@ -21,6 +21,7 @@ jobs:
           libopencv-dev python3-opencv \
           libgl1 libglib2.0-0 \
           libgl1-mesa-dev libglu1-mesa-dev libglx-dev \
+          libglew-dev \
           libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
           xvfb
 
@@ -35,18 +36,13 @@ jobs:
     - name: Clone SAM3DBody-cpp
       run: git clone https://github.com/AmmarkoV/SAM3DBody-cpp.git
 
-    - name: Download CPU Models (ZIP Package)
+    - name: Fetch CPU Models
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
       run: |
         cd SAM3DBody-cpp
-        mkdir -p onnx
-        hf download AmmarkoV/SAM3DBody-cpp-onnx-models \
-          --include "SAM3DBody-cpp-onnx-models.zip" \
-          --local-dir ./temp_models
-        unzip -o temp_models/SAM3DBody-cpp-onnx-models.zip -d onnx/
-        rm -rf temp_models
-        ls -lh onnx/
+        bash tools/fetch_model.sh shared cpu
+        ls -lh onnx/ || true
 
     - name: Build SAM3DBody-cpp (CPU-Only)
       run: |
@@ -56,8 +52,7 @@ jobs:
         make -j$(nproc)
 
     - name: Run SAM Pipeline (Headless)
-      run: |
-        xvfb-run -a python test_sam.py
+      run: xvfb-run -a python test_sam.py
 
     - name: Upload Output Artifacts
       uses: actions/upload-artifact@v4
