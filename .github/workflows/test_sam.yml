@@ -26,17 +26,31 @@ jobs:
       with:
         python-version: "3.10"
 
+    - name: Install Hugging Face CLI
+      run: pip install huggingface_hub
+
     - name: Clone SAM3DBody-cpp
       run: git clone https://github.com/AmmarkoV/SAM3DBody-cpp.git
 
-    - name: Setup SAM3DBody-cpp (CPU Only)
+    - name: Download CPU-Compatible ONNX Models
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
       run: |
         cd SAM3DBody-cpp
-        bash scripts/setup.sh --cpu-only --cpu-backbone
+        mkdir -p onnx
+        # Download FP32 backbone and FP16 decoder (CPU-compatible)
+        hf download AmmarkoV/SAM3DBody-cpp-onnx-models \
+          --include "backbone_fp32.onnx*" "decoder_fp16.onnx*" \
+          --local-dir ./onnx
+        # Rename to what the binary expects
+        mv onnx/backbone_fp32.onnx onnx/backbone.onnx || true
+        mv onnx/backbone_fp32.onnx.data onnx/backbone.onnx.data || true
+        mv onnx/decoder_fp16.onnx onnx/decoder.onnx || true
+        mv onnx/decoder_fp16.onnx.data onnx/decoder.onnx.data || true
+        # List files for debugging
+        ls -lh onnx/
 
-    - name: Build SAM3DBody-cpp (CPU Only)
+    - name: Build SAM3DBody-cpp (CPU-Only)
       run: |
         cd SAM3DBody-cpp
         mkdir -p build && cd build
