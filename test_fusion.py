@@ -8,7 +8,6 @@ import cv2
 from PIL import Image
 from transformers import pipeline
 import trimesh
-from collections import defaultdict
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -23,23 +22,26 @@ HMR_DIR = "out_hmr2"
 OUTPUT_DIR = "out_fusion"
 DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Base-hf"
 
-# Target resolution
 TARGET_VERTICES = 206700
 
-# Displacement
+# Displacement (tuned for 200k verts)
 DETAIL_STRENGTH = 1.0
 BLUR_SIGMA = 45
-SMOOTH_ITERS = 3
+SMOOTH_ITERS = 8
 DETAIL_PCT_LOW = 5
 DETAIL_PCT_HIGH = 95
-MAX_DISPLACEMENT = 0.04
-MAX_GRADIENT = 0.004
+MAX_DISPLACEMENT = 0.02
+MAX_GRADIENT = 0.002
 
-# Reliefs
-FACE_RELIEF = 0.008
+# Relief magnitudes (small!)
+FACE_RELIEF = 0.006
+FACE_SIGMA = 0.008
 HAND_RELIEF = 0.003
-HAIR_RELIEF = 0.012
-SILHOUETTE_PUFF = 0.0
+HAND_SIGMA = 0.006
+HAIR_RELIEF = 0.008
+
+# Overall displacement clamp
+TOTAL_DISPLACEMENT_CAP = 0.03
 
 USE_DSINE = True
 USE_FACE = True
@@ -67,7 +69,7 @@ img_w = int(data["image_w"])
 log.info(f"HMR2.0: {len(vertices)} verts, {len(faces)} faces")
 
 # =====================================================
-# HIGH-RESOLUTION MESH PREPARATION
+# HIGH-RES MESH PREPARATION
 # =====================================================
 log.info("=" * 60)
 log.info("HIGH-RES MESH PREPARATION")
@@ -79,16 +81,12 @@ mesh.merge_vertices()
 mesh.remove_unreferenced_vertices()
 log.info(f"Base: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
 
-# Subdivide until exceeding target
 subdiv_count = 0
-while len(mesh.vertices) < TARGET_VERTICES:
+while len(mesh.vertices) < TARGET_VERTICES and subdiv_count < 4:
     mesh = mesh.subdivide()
     subdiv_count += 1
     log.info(f"  After subdiv {subdiv_count}: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
-    if subdiv_count > 5:
-        break
 
-# Decimate if overshot significantly
 if len(mesh.vertices) > TARGET_VERTICES * 1.10:
     target_faces = int(TARGET_VERTICES * 2)
     log.info(f"Decimating to ~{target_faces} faces")
@@ -96,7 +94,7 @@ if len(mesh.vertices) > TARGET_VERTICES * 1.10:
         mesh = mesh.simplify_quadric_decimation(face_count=target_faces)
         log.info(f"  After decimation: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
     except Exception as e:
-        log.warning(f"Decimation failed ({e}) -- keeping full subdiv mesh")
+        log.warning(f"Decimation failed: {e}")
 
 log.info(f"FINAL resolution: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
 log.info(f"Prep time: {time.time()-t0:.2f}s")
@@ -170,7 +168,6 @@ detail_edges = cv2.dilate(detail_edges, np.ones((5, 5), np.uint8), iterations=1)
 detail[detail_edges > 0] = 0.0
 
 log.info(f"Detail: min={detail.min():.3f} max={detail.max():.3f} std={detail.std():.3f}")
-log.info(f"Edges zeroed: {(detail_edges > 0).sum()}")
 cv2.imwrite(os.path.join(OUTPUT_DIR, "fusion_detail_" + base_name + ".png"),
             ((detail + 1.0) * 127.5).astype(np.uint8))
 log.info(f"Detail time: {time.time()-t0:.2f}s")
@@ -181,7 +178,7 @@ log.info(f"Detail time: {time.time()-t0:.2f}s")
 dsine_normals = None
 if USE_DSINE:
     log.info("=" * 60)
-    log.info("STAGE 3: DSINE Normals")
+    log.info("STAGE 3: DSINE")
     log.info("=" * 60)
     t0 = time.time()
     dsine_path = "DSINE/projects/dsine/checkpoints/exp001_cvpr2024/dsine.pt"
@@ -221,7 +218,7 @@ if USE_DSINE:
 face_landmarks = None
 if USE_FACE:
     log.info("=" * 60)
-    log.info("STAGE 4: Face Mesh")
+    log.info("STAGE 4: Face")
     log.info("=" * 60)
     t0 = time.time()
     try:
@@ -328,7 +325,7 @@ else:
 front_mask = use_normals[:, 2] > 0.4
 log.info(f"Front-facing: {front_mask.sum()} / {len(verts)}")
 
-# Bidirectional displacement
+# Base displacement
 mesh_z_norm = (verts[:, 2] - verts[:, 2].min()) / (verts[:, 2].max() - verts[:, 2].min() + 1e-8)
 image_depth = d[py, px]
 depth_diff = image_depth - mesh_z_norm
@@ -354,7 +351,7 @@ neighbor_count = np.asarray(adj.sum(axis=1)).flatten()
 log.info(f"Adjacency built. Avg neighbors: {neighbor_count.mean():.1f}")
 
 log.info("Gradient limiting (vectorized)...")
-for iteration in range(15):
+for iteration in range(20):
     neighbor_avg = adj.dot(raw_disp) / (neighbor_count + 1e-8)
     delta = raw_disp - neighbor_avg
     clamped = np.clip(delta, -MAX_GRADIENT, MAX_GRADIENT)
@@ -377,51 +374,73 @@ log.info(f"Spike filter: {spike_mask.sum()} verts corrected")
 
 displacement = use_normals * raw_disp[:, None]
 
-# Face relief
+# =====================================================
+# FACE RELIEF (single weight map with MAX - no stacking)
+# =====================================================
 if face_landmarks is not None:
+    face_weight = np.zeros(len(verts), dtype=np.float32)
     fl_nx = np.clip((face_landmarks[:, 0] - bx1) / (bx2 - bx1), 0, 1)
     fl_ny = np.clip((face_landmarks[:, 1] - by1) / (by2 - by1), 0, 1)
     fmx = x_min + fl_nx * (x_max - x_min)
     fmy = y_max - fl_ny * (y_max - y_min)
-    face_count = 0
-    for i in range(0, len(fmx), 8):
+
+    for i in range(len(fmx)):
         dx = verts[:, 0] - fmx[i]
         dy = verts[:, 1] - fmy[i]
-        dist = np.sqrt(dx*dx + dy*dy)
-        weight = np.exp(-(dist**2) / (2 * 0.025**2))
-        mask = weight > 0.3
-        if mask.any():
-            displacement[mask] += use_normals[mask] * (FACE_RELIEF * weight[mask, None])
-            face_count += int(mask.sum())
-    log.info(f"Face relief hits: {face_count}")
+        dist_sq = dx*dx + dy*dy
+        w = np.exp(-dist_sq / (2 * FACE_SIGMA**2))
+        face_weight = np.maximum(face_weight, w.astype(np.float32))
 
-# Hand relief
+    face_mask = face_weight > 0.3
+    face_hits = int(face_mask.sum())
+    displacement[face_mask] += use_normals[face_mask] * (FACE_RELIEF * face_weight[face_mask, None])
+    log.info(f"Face relief hits: {face_hits} (weight max: {face_weight.max():.3f})")
+
+# =====================================================
+# HAND RELIEF (single weight map with MAX - no stacking)
+# =====================================================
 if hand_landmarks is not None:
-    hand_count = 0
+    hand_weight = np.zeros(len(verts), dtype=np.float32)
     for hand in hand_landmarks:
         h_nx = np.clip((hand[:, 0] - bx1) / (bx2 - bx1), 0, 1)
         h_ny = np.clip((hand[:, 1] - by1) / (by2 - by1), 0, 1)
         hmx = x_min + h_nx * (x_max - x_min)
         hmy = y_max - h_ny * (y_max - y_min)
-        for i in range(0, len(hmx), 3):
+        for i in range(len(hmx)):
             dx = verts[:, 0] - hmx[i]
             dy = verts[:, 1] - hmy[i]
-            dist = np.sqrt(dx*dx + dy*dy)
-            weight = np.exp(-(dist**2) / (2 * 0.02**2))
-            mask = weight > 0.3
-            if mask.any():
-                displacement[mask] += use_normals[mask] * (HAND_RELIEF * weight[mask, None])
-                hand_count += int(mask.sum())
-    log.info(f"Hand relief hits: {hand_count}")
+            dist_sq = dx*dx + dy*dy
+            w = np.exp(-dist_sq / (2 * HAND_SIGMA**2))
+            hand_weight = np.maximum(hand_weight, w.astype(np.float32))
 
-# Hair relief
+    hand_mask = hand_weight > 0.3
+    hand_hits = int(hand_mask.sum())
+    displacement[hand_mask] += use_normals[hand_mask] * (HAND_RELIEF * hand_weight[hand_mask, None])
+    log.info(f"Hand relief hits: {hand_hits} (weight max: {hand_weight.max():.3f})")
+
+# =====================================================
+# HAIR RELIEF
+# =====================================================
 if hair_mask is not None:
-    hair_val = hair_mask[py, px] / 255.0
+    hair_val = hair_mask[py, px].astype(np.float32) / 255.0
     displacement += use_normals * ((hair_val * HAIR_RELIEF)[:, None])
     log.info(f"Hair relief on {(hair_val > 0.5).sum()} verts")
 
+# =====================================================
+# GLOBAL DISPLACEMENT CAP (final safety)
+# =====================================================
+disp_magnitude = np.linalg.norm(displacement, axis=1)
+over_cap = disp_magnitude > TOTAL_DISPLACEMENT_CAP
+if over_cap.any():
+    scale = TOTAL_DISPLACEMENT_CAP / (disp_magnitude[over_cap] + 1e-8)
+    displacement[over_cap] = displacement[over_cap] * scale[:, None]
+    log.info(f"Total displacement cap: {over_cap.sum()} verts scaled down")
+
+log.info(f"Disp magnitude: max={disp_magnitude.max():.4f} mean={disp_magnitude.mean():.4f}")
+
 new_verts = verts + displacement
-log.info(f"Total max change: {float(np.abs(new_verts - verts).max()):.4f}")
+total_change = float(np.abs(new_verts - verts).max())
+log.info(f"Total max change: {total_change:.4f}")
 
 mesh = trimesh.Trimesh(vertices=new_verts, faces=mesh.faces, process=False)
 log.info(f"Fusion time: {time.time()-t0:.2f}s")
