@@ -1,10 +1,14 @@
 import os
 import subprocess
+import glob
+import shutil
+import time
 
-INPUT_DIR = "inputs"
-OUTPUT_DIR = "out_sam"
-# Correct binary name and path
-SAM_BINARY = "SAM3DBody-cpp/build/fast_sam_3dbody_run"
+INPUT_DIR = os.path.abspath("inputs")
+OUTPUT_DIR = os.path.abspath("out_sam")
+SAM_DIR = os.path.abspath("SAM3DBody-cpp")
+SAM_BINARY = os.path.join(SAM_DIR, "build", "fast_sam_3dbody_run")
+ONNX_DIR = os.path.join(SAM_DIR, "onnx")
 
 MESH_DIR = os.path.join(OUTPUT_DIR, "meshes")
 BVH_DIR = os.path.join(OUTPUT_DIR, "bvh")
@@ -16,38 +20,33 @@ def setup_dirs():
 
 def run_sam_on_image(image_path, image_name):
     stem = os.path.splitext(image_name)[0]
-
-    mesh_out = os.path.join(MESH_DIR, f"{stem}.obj")
-    bvh_out  = os.path.join(BVH_DIR, f"{stem}.bvh")
-    json_out = os.path.join(JSON_DIR, f"{stem}.json")
-
-    # Correct command-line arguments based on the C++ CLI
-    # The --from flag is the primary input, outputs are handled via config or defaults
+    # Run from SAM_DIR so the binary finds its default folders
+    rel_image_path = os.path.relpath(image_path, SAM_DIR)
     cmd = [
         SAM_BINARY,
-        "--from", image_path,
-        # Note: The C++ CLI may not support custom output paths directly.
-        # It often saves outputs to a default folder.
-        # If custom paths fail, the script below will still run,
-        # but you may need to check the default output location.
+        "--from", rel_image_path,
+        "--onnx-dir", ONNX_DIR,
+        "--cpu"
     ]
-
-    print(f"[*] Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-
+    print(f"[*] Running: {' '.join(cmd)} (cwd={SAM_DIR})")
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=SAM_DIR)
     if result.returncode != 0:
         print(f"    [ERROR] {result.stderr}")
         return False
-
     print(f"    [OK] {result.stdout.strip()}")
-    # Post-run: Move outputs to our desired folders if the CLI saved them elsewhere
-    # This part depends on the actual behavior of the C++ binary.
-    # For now, we assume it might save to a default location or we handle it later.
+
+    # After run, find newly created files in SAM_DIR and move them
+    now = time.time()
+    for ext, dest_dir in [(".obj", MESH_DIR), (".bvh", BVH_DIR), (".json", JSON_DIR)]:
+        for f in glob.glob(os.path.join(SAM_DIR, f"*{ext}")):
+            if os.path.getmtime(f) > now - 60:  # created/modified in last 60 sec
+                dest = os.path.join(dest_dir, f"{stem}{ext}")
+                shutil.move(f, dest)
+                print(f"    Moved {os.path.basename(f)} -> {dest}")
     return True
 
 def main():
     setup_dirs()
-
     if not os.path.isdir(INPUT_DIR):
         os.makedirs(INPUT_DIR, exist_ok=True)
         print(f"[!] Created {INPUT_DIR}. Add images and rerun.")
@@ -72,7 +71,7 @@ def main():
             fail += 1
 
     print(f"\n[SUMMARY] Success: {success} | Failed: {fail}")
-    print(f"[*] Check outputs in: {OUTPUT_DIR}/ and the default output folder of the C++ binary.")
+    print(f"[*] Outputs saved in: {OUTPUT_DIR}/")
 
 if __name__ == "__main__":
     main()
