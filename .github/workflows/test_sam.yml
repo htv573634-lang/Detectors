@@ -26,24 +26,17 @@ jobs:
       with:
         python-version: "3.10"
 
-    - name: Install Hugging Face CLI
-      run: pip install huggingface_hub
-
-    - name: Login to Hugging Face
-      run: huggingface-cli login --token ${{ secrets.HF_TOKEN }}
-
     - name: Clone SAM3DBody-cpp
       run: git clone https://github.com/AmmarkoV/SAM3DBody-cpp.git
 
-    - name: Download CPU Models
+    - name: Setup SAM3DBody-cpp (CPU Only)
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
       run: |
         cd SAM3DBody-cpp
-        mkdir -p onnx
-        hf download AmmarkoV/SAM3DBody-cpp-onnx-models \
-          --exclude "backbone_fp32.onnx" \
-          --local-dir ./onnx
+        bash scripts/setup.sh --cpu-only --cpu-backbone
 
-    - name: Build SAM3DBody-cpp (CPU-Only)
+    - name: Build SAM3DBody-cpp (CPU Only)
       run: |
         cd SAM3DBody-cpp
         mkdir -p build && cd build
