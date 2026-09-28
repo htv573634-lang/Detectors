@@ -19,22 +19,22 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: pip-fusion-v5-${{ runner.os }}
-          restore-keys: pip-fusion-v5-
+          key: pip-fusion-v6-${{ runner.os }}
+          restore-keys: pip-fusion-v6-
 
       - name: Cache HuggingFace
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-fusion-v5-${{ runner.os }}
-          restore-keys: hf-fusion-v5-
+          key: hf-fusion-v6-${{ runner.os }}
+          restore-keys: hf-fusion-v6-
 
-      - name: Cache DSINE repo
+      - name: Cache DSINE
         uses: actions/cache@v4
         with:
           path: DSINE
-          key: dsine-v5-${{ runner.os }}
-          restore-keys: dsine-v5-
+          key: dsine-v6-${{ runner.os }}
+          restore-keys: dsine-v6-
 
       - uses: actions/setup-python@v5
         with:
@@ -55,43 +55,25 @@ jobs:
           pip install transformers
           pip install onnxruntime
           pip install "mediapipe==0.10.9"
-          python -c "import scipy; print('[OK] scipy:', scipy.__version__)"
-          python -c "import trimesh; print('[OK] trimesh:', trimesh.__version__)"
-          python -c "import fast_simplification; print('[OK] fast_simplification OK')"
 
       - name: Clone DSINE (if cache miss)
         if: hashFiles('DSINE/projects/dsine/checkpoints/exp001_cvpr2024/dsine.pt') == ''
         run: |
           git clone --depth 1 https://github.com/baegwangbin/DSINE.git
           mkdir -p DSINE/projects/dsine/checkpoints/exp001_cvpr2024
-          wget -q --show-progress -O DSINE/projects/dsine/checkpoints/exp001_cvpr2024/dsine.pt \
-            "https://huggingface.co/camenduru/DSINE/resolve/main/dsine.pt" \
-            || echo "WARN: DSINE ckpt download failed"
-          ls -lh DSINE/projects/dsine/checkpoints/exp001_cvpr2024/ || true
-
-      - name: Verify DSINE checkpoint
-        run: |
-          DSINE_PT="DSINE/projects/dsine/checkpoints/exp001_cvpr2024/dsine.pt"
-          if [ -f "$DSINE_PT" ]; then
-            echo "DSINE ckpt present: $(stat -c%s $DSINE_PT) bytes"
-          else
-            echo "WARN: DSINE ckpt missing -- will fall back to depth-gradient normals"
-          fi
+          wget -q -O DSINE/projects/dsine/checkpoints/exp001_cvpr2024/dsine.pt \
+            "https://huggingface.co/camenduru/DSINE/resolve/main/dsine.pt" || true
 
       - name: Verify HMR2.0 output
         run: |
-          ls -la out_hmr2/ || echo "out_hmr2/ empty"
           PARAMS=$(ls out_hmr2/hmr2_params_*.npz 2>/dev/null | head -1)
           if [ -z "$PARAMS" ]; then
-            echo "ERROR: No hmr2_params_*.npz in out_hmr2/"
+            echo "ERROR: No hmr2_params_*.npz"
             exit 1
           fi
-          echo "Params found: $PARAMS"
+          echo "Params: $PARAMS"
 
-      - name: Memory and disk check
-        run: free -h && df -h /home/runner
-
-      - name: Run enhanced fusion
+      - name: Run fusion
         id: fusion_test
         env:
           PYTHONUNBUFFERED: "1"
@@ -101,31 +83,26 @@ jobs:
 
       - name: Show log tail
         if: always()
-        run: tail -150 /tmp/fusion_output.log 2>/dev/null || echo "No log"
+        run: tail -180 /tmp/fusion_output.log 2>/dev/null || echo "No log"
 
-      - name: Memory after
-        if: always()
-        run: free -h
-
-      - name: Sync with remote
+      - name: Commit output
         if: always()
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # FIX: stage output before pull so rebase doesn't fail
+          git add out_fusion/ || true
+          git stash push --keep-index --include-untracked -m "fusion-output" || true
           git pull --rebase origin main || true
-
-      - uses: stefanzweifel/git-auto-commit-action@v5
-        if: always()
-        with:
-          commit_message: "Enhanced fusion output (high-res)"
-          file_pattern: "out_fusion/*"
-          branch: main
-          push_options: '--force-with-lease'
+          git stash pop || true
+          git add out_fusion/ || true
+          git diff --staged --quiet || git commit -m "Enhanced fusion output (v6)"
+          git push origin main --force-with-lease || echo "Push skipped"
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: fusion-enhanced-results
+          name: fusion-results
           path: |
             out_fusion/
             /tmp/fusion_output.log
