@@ -19,22 +19,22 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: pip-triposr-v1-${{ runner.os }}
-          restore-keys: pip-triposr-v1-
+          key: pip-triposr-v2-${{ runner.os }}
+          restore-keys: pip-triposr-v2-
 
       - name: Cache HuggingFace
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-triposr-v1-${{ runner.os }}
-          restore-keys: hf-triposr-v1-
+          key: hf-triposr-v2-${{ runner.os }}
+          restore-keys: hf-triposr-v2-
 
       - name: Cache TripoSR repo
         uses: actions/cache@v4
         with:
           path: TripoSR
-          key: triposr-repo-v1-${{ runner.os }}
-          restore-keys: triposr-repo-v1-
+          key: triposr-repo-v2-${{ runner.os }}
+          restore-keys: triposr-repo-v2-
 
       - uses: actions/setup-python@v5
         with:
@@ -52,14 +52,28 @@ jobs:
           fi
           ls TripoSR/
 
-      - name: Install Python deps
+      # ---- ORDER MATTERS ----
+      # 1. Install torch FIRST (torchmcubes needs it at build time)
+      - name: Install torch CPU
         run: |
           pip install --upgrade pip
           pip install "setuptools<81" wheel
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          pip install -r TripoSR/requirements.txt
-          pip install onnxruntime
           python -c "import torch; print('[OK] torch:', torch.__version__)"
+
+      # 2. Build torchmcubes WITHOUT isolation (uses the torch we just installed)
+      - name: Install torchmcubes (no isolation)
+        run: |
+          pip install --no-build-isolation git+https://github.com/tatsy/torchmcubes.git
+          python -c "import torchmcubes; print('[OK] torchmcubes OK')"
+
+      # 3. Now install the remaining requirements
+      - name: Install TripoSR requirements
+        run: |
+          # Remove torchmcubes from requirements to avoid re-install
+          grep -v torchmcubes TripoSR/requirements.txt > /tmp/reqs_nomcubes.txt || true
+          pip install -r /tmp/reqs_nomcubes.txt
+          pip install onnxruntime
 
       - name: Memory check
         run: free -h && df -h /home/runner
