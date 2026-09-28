@@ -1,0 +1,62 @@
+name: Test SAM3DBody-cpp Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  run-sam:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Detectors Repo
+      uses: actions/checkout@v4
+
+    - name: Install System Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential cmake git wget \
+          libopencv-dev python3-opencv \
+          libgl1 libglib2.0-0
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+
+    - name: Install Hugging Face CLI
+      run: pip install huggingface_hub
+
+    - name: Clone SAM3DBody-cpp
+      run: |
+        git clone https://github.com/AmmarkoV/SAM3DBody-cpp.git
+        cd SAM3DBody-cpp
+
+    - name: Download CPU-Compatible ONNX Models
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: |
+        cd SAM3DBody-cpp
+        mkdir -p onnx
+        hf download AmmarkoV/SAM3DBody-cpp-onnx-models \
+          --include "backbone_fp32.onnx*" "decoder_fp16.onnx*" \
+          --local-dir ./onnx \
+          --token $HF_TOKEN
+
+    - name: Build SAM3DBody-cpp (CPU-Only)
+      run: |
+        cd SAM3DBody-cpp
+        mkdir -p build && cd build
+        cmake .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=OFF
+        make -j$(nproc)
+
+    - name: Run SAM Pipeline on Inputs
+      run: python test_sam.py
+
+    - name: Upload Output Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: sam-output
+        path: out_sam/
