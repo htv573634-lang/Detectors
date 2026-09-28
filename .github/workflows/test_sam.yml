@@ -19,7 +19,10 @@ jobs:
         sudo apt-get install -y \
           build-essential cmake git wget unzip \
           libopencv-dev python3-opencv \
-          libgl1 libglib2.0-0
+          libgl1 libglib2.0-0 \
+          libgl1-mesa-dev libglu1-mesa-dev libglx-dev \
+          libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+          xvfb
 
     - name: Set up Python 3.10
       uses: actions/setup-python@v5
@@ -38,15 +41,11 @@ jobs:
       run: |
         cd SAM3DBody-cpp
         mkdir -p onnx
-        # Download the complete model package as a ZIP file
         hf download AmmarkoV/SAM3DBody-cpp-onnx-models \
           --include "SAM3DBody-cpp-onnx-models.zip" \
           --local-dir ./temp_models
-        # Extract the ZIP into the onnx folder
         unzip -o temp_models/SAM3DBody-cpp-onnx-models.zip -d onnx/
-        # Clean up the temporary folder
         rm -rf temp_models
-        # List files to verify the extraction
         ls -lh onnx/
 
     - name: Build SAM3DBody-cpp (CPU-Only)
@@ -56,11 +55,13 @@ jobs:
         cmake .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=OFF
         make -j$(nproc)
 
-    - name: Run SAM Pipeline
-      run: python test_sam.py
+    - name: Run SAM Pipeline (Headless)
+      run: |
+        xvfb-run -a python test_sam.py
 
     - name: Upload Output Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: sam-output
         path: out_sam/
+        if-no-files-found: warn
