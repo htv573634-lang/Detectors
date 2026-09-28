@@ -20,7 +20,6 @@ def setup_dirs():
 
 def run_sam_on_image(image_path, image_name):
     stem = os.path.splitext(image_name)[0]
-    # Run from SAM_DIR so the binary finds its default folders
     rel_image_path = os.path.relpath(image_path, SAM_DIR)
     cmd = [
         SAM_BINARY,
@@ -35,11 +34,10 @@ def run_sam_on_image(image_path, image_name):
         return False
     print(f"    [OK] {result.stdout.strip()}")
 
-    # After run, find newly created files in SAM_DIR and move them
     now = time.time()
     for ext, dest_dir in [(".obj", MESH_DIR), (".bvh", BVH_DIR), (".json", JSON_DIR)]:
         for f in glob.glob(os.path.join(SAM_DIR, f"*{ext}")):
-            if os.path.getmtime(f) > now - 60:  # created/modified in last 60 sec
+            if os.path.getmtime(f) > now - 60:
                 dest = os.path.join(dest_dir, f"{stem}{ext}")
                 shutil.move(f, dest)
                 print(f"    Moved {os.path.basename(f)} -> {dest}")
