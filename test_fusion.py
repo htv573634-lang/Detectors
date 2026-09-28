@@ -16,7 +16,7 @@ HMR_DIR = "out_hmr2"
 OUTPUT_DIR = "out_fusion"
 DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Base-hf"
 
-# Gradient-limited displacement (prevents spikes)
+# Bidirectional displacement (can push in OR out)
 DETAIL_STRENGTH = 1.0
 BLUR_SIGMA = 45
 SMOOTH_ITERS = 6
@@ -25,10 +25,11 @@ DETAIL_PCT_HIGH = 95
 MAX_DISPLACEMENT = 0.04
 MAX_GRADIENT = 0.008
 
-FACE_RELIEF = 0.015
-HAND_RELIEF = 0.012
-HAIR_RELIEF = 0.02
-SILHOUETTE_PUFF = 0.005
+# Reliefs (very small)
+FACE_RELIEF = 0.008
+HAND_RELIEF = 0.003
+HAIR_RELIEF = 0.012
+SILHOUETTE_PUFF = 0.0
 
 USE_DSINE = True
 USE_FACE = True
@@ -103,7 +104,7 @@ cv2.imwrite(os.path.join(OUTPUT_DIR, "fusion_depth_" + base_name + ".png"),
 print("[OK] Depth map saved")
 
 # =====================================================
-# STAGE 2: DEPTH DETAIL
+# STAGE 2: DEPTH DETAIL (WITH EDGE SUPPRESSION)
 # =====================================================
 print("[INFO] Stage 2: Extracting depth detail...")
 d_blur = cv2.GaussianBlur(d, (0, 0), BLUR_SIGMA)
@@ -117,6 +118,12 @@ std = detail.std() + 1e-8
 detail = detail / (std * 2.0)
 detail = np.clip(detail, -1.0, 1.0)
 detail = cv2.GaussianBlur(detail, (0, 0), 3.0)
+
+# Suppress edges to prevent boundary artifacts
+detail_edges = cv2.Canny((detail * 255).astype(np.uint8), 50, 150)
+detail_edges = cv2.dilate(detail_edges, np.ones((5, 5), np.uint8), iterations=1)
+detail[detail_edges > 0] = 0.0
+print("[INFO] Detail edges suppressed: " + str(int((detail_edges > 0).sum())) + " pixels")
 
 print("[INFO] Detail stats: min=" + str(round(float(detail.min()),3))
       + " max=" + str(round(float(detail.max()),3))
@@ -264,7 +271,7 @@ if USE_HAIR:
         print("[WARN] Hair failed: " + str(e))
 
 # =====================================================
-# STAGE 7: BUILD FUSED MESH (GRADIENT-LIMITED)
+# STAGE 7: BUILD FUSED MESH (BIDIRECTIONAL)
 # =====================================================
 print("[INFO] Stage 7: Building fused mesh...")
 mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
@@ -296,25 +303,43 @@ else:
     use_normals = vnormals
     print("[INFO] Using mesh normals")
 
-# Sample depth detail
-vertex_detail = detail[py, px]
-
 # Strict front-facing mask
 front_mask = use_normals[:, 2] > 0.4
 print("[INFO] Front-facing: " + str(int(front_mask.sum())) + " / " + str(len(verts)))
 
-# Base displacement
-raw_disp = vertex_detail * DETAIL_STRENGTH
+# =====================================================
+# BIDIRECTIONAL DISPLACEMENT
+# Compares mesh depth vs image depth per vertex
+# Positive = mesh too shallow -> push out
+# Negative = mesh too deep  -> push in (slims the body)
+# =====================================================
+mesh_z = verts[:, 2]
+mesh_z_min, mesh_z_max = mesh_z.min(), mesh_z.max()
+mesh_z_norm = (mesh_z - mesh_z_min) / (mesh_z_max - mesh_z_min + 1e-8)
+
+# Image depth at each vertex (0 = far, 1 = near)
+image_depth = d[py, px]
+
+# Depth difference
+depth_diff = image_depth - mesh_z_norm
+print("[INFO] Depth diff: min=" + str(round(float(depth_diff.min()), 4))
+      + " max=" + str(round(float(depth_diff.max()), 4))
+      + " mean=" + str(round(float(depth_diff.mean()), 4)))
+
+# Bidirectional displacement
+raw_disp = depth_diff * DETAIL_STRENGTH
 raw_disp = np.clip(raw_disp, -MAX_DISPLACEMENT, MAX_DISPLACEMENT)
 raw_disp = raw_disp * front_mask.astype(np.float32)
 
-# Tiny silhouette puff
-puff = front_mask.astype(np.float32) * SILHOUETTE_PUFF
-raw_disp = raw_disp + puff
+# Tiny silhouette puff (0.0 = disabled)
+if SILHOUETTE_PUFF > 0:
+    raw_disp = raw_disp + front_mask.astype(np.float32) * SILHOUETTE_PUFF
 
 print("[INFO] Before gradient limit:")
 print("  max abs: " + str(round(float(np.abs(raw_disp).max()), 4)))
 print("  mean abs: " + str(round(float(np.abs(raw_disp).mean()), 4)))
+print("  negative verts (pushed in): " + str(int((raw_disp < -0.001).sum())))
+print("  positive verts (pushed out): " + str(int((raw_disp > 0.001).sum())))
 
 # ---- GRADIENT LIMITING ----
 print("[INFO] Applying gradient limiting...")
@@ -348,9 +373,52 @@ print("[INFO] After gradient limit:")
 print("  max abs: " + str(round(float(np.abs(raw_disp).max()), 4)))
 print("  mean abs: " + str(round(float(np.abs(raw_disp).mean()), 4)))
 
+# ---- ISOLATED SPIKE FILTER ----
+spike_threshold = MAX_GRADIENT * 3
+spikes_removed = 0
+for i in range(len(raw_disp)):
+    if not front_mask[i]:
+        continue
+    nbrs = [n for n in neighbors[i] if front_mask[n]]
+    if len(nbrs) < 3:
+        raw_disp[i] = 0.0
+        spikes_removed += 1
+        continue
+    nbr_avg = float(np.mean([raw_disp[n] for n in nbrs]))
+    if abs(raw_disp[i] - nbr_avg) > spike_threshold:
+        raw_disp[i] = nbr_avg
+        spikes_removed += 1
+print("[INFO] Spike filter: " + str(spikes_removed) + " vertices corrected")
+
 displacement = use_normals * raw_disp[:, None]
 
-# Face relief (Gaussian falloff)
+# =====================================================
+# WIDTH PRESERVATION
+# Compare mesh projected width to image bbox width
+# =====================================================
+print("[INFO] Checking mesh vs image width...")
+mask_proj = np.zeros((img_h, img_w), dtype=np.uint8)
+mask_proj[py, px] = 255
+mask_ys, mask_xs = np.where(mask_proj > 0)
+if len(mask_xs) > 0:
+    mesh_width = float(mask_xs.max() - mask_xs.min())
+    bbox_width = float(bx2 - bx1)
+    width_ratio = mesh_width / (bbox_width + 1e-8)
+    print("[INFO] Mesh width: " + str(round(mesh_width, 1))
+          + " | bbox width: " + str(round(bbox_width, 1))
+          + " | ratio: " + str(round(width_ratio, 3)))
+
+    if width_ratio > 1.05:
+        scale_factor = 1.0 / width_ratio
+        print("[INFO] Mesh wider than image -- scaling X/Y by " + str(round(scale_factor, 3)))
+        center_x = (verts[:, 0].min() + verts[:, 0].max()) / 2
+        center_y = (verts[:, 1].min() + verts[:, 1].max()) / 2
+        verts[:, 0] = center_x + (verts[:, 0] - center_x) * scale_factor
+        verts[:, 1] = center_y + (verts[:, 1] - center_y) * scale_factor
+    else:
+        print("[INFO] Width OK -- no scaling")
+
+# Face relief
 if face_landmarks is not None:
     fl_nx = np.clip((face_landmarks[:, 0] - bx1) / (bx2 - bx1), 0, 1)
     fl_ny = np.clip((face_landmarks[:, 1] - by1) / (by2 - by1), 0, 1)
@@ -361,8 +429,8 @@ if face_landmarks is not None:
         dx = verts[:, 0] - fmx[i]
         dy = verts[:, 1] - fmy[i]
         dist = np.sqrt(dx*dx + dy*dy)
-        weight = np.exp(-(dist**2) / (2 * 0.02**2))
-        mask = weight > 0.1
+        weight = np.exp(-(dist**2) / (2 * 0.025**2))
+        mask = weight > 0.3
         if mask.any():
             displacement[mask] += use_normals[mask] * (FACE_RELIEF * weight[mask, None])
             face_count += int(mask.sum())
@@ -376,12 +444,12 @@ if hand_landmarks is not None:
         h_ny = np.clip((hand[:, 1] - by1) / (by2 - by1), 0, 1)
         hmx = x_min + h_nx * (x_max - x_min)
         hmy = y_max - h_ny * (y_max - y_min)
-        for i in range(0, len(hmx), 3):
+        for i in range(0, len(hmx), 5):
             dx = verts[:, 0] - hmx[i]
             dy = verts[:, 1] - hmy[i]
             dist = np.sqrt(dx*dx + dy*dy)
-            weight = np.exp(-(dist**2) / (2 * 0.015**2))
-            mask = weight > 0.1
+            weight = np.exp(-(dist**2) / (2 * 0.02**2))
+            mask = weight > 0.3
             if mask.any():
                 displacement[mask] += use_normals[mask] * (HAND_RELIEF * weight[mask, None])
                 hand_count += int(mask.sum())
