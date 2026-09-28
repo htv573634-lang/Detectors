@@ -1,12 +1,11 @@
 import os
 import subprocess
-import shutil
 
 INPUT_DIR = "inputs"
 OUTPUT_DIR = "out_sam"
+# Adjust this path if the binary name or location changes after build
 SAM_BINARY = "SAM3DBody-cpp/build/SAM3DBody"
 
-# Output subfolders
 MESH_DIR = os.path.join(OUTPUT_DIR, "meshes")
 BVH_DIR = os.path.join(OUTPUT_DIR, "bvh")
 JSON_DIR = os.path.join(OUTPUT_DIR, "json")
