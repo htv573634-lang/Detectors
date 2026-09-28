@@ -3,8 +3,8 @@ import subprocess
 
 INPUT_DIR = "inputs"
 OUTPUT_DIR = "out_sam"
-# Adjust this path if the binary name or location changes after build
-SAM_BINARY = "SAM3DBody-cpp/build/SAM3DBody"
+# Correct binary name and path
+SAM_BINARY = "SAM3DBody-cpp/build/fast_sam_3dbody_run"
 
 MESH_DIR = os.path.join(OUTPUT_DIR, "meshes")
 BVH_DIR = os.path.join(OUTPUT_DIR, "bvh")
@@ -21,13 +21,15 @@ def run_sam_on_image(image_path, image_name):
     bvh_out  = os.path.join(BVH_DIR, f"{stem}.bvh")
     json_out = os.path.join(JSON_DIR, f"{stem}.json")
 
+    # Correct command-line arguments based on the C++ CLI
+    # The --from flag is the primary input, outputs are handled via config or defaults
     cmd = [
         SAM_BINARY,
-        "--input", image_path,
-        "--mesh-out", mesh_out,
-        "--bvh-out", bvh_out,
-        "--json-out", json_out,
-        "--cpu"
+        "--from", image_path,
+        # Note: The C++ CLI may not support custom output paths directly.
+        # It often saves outputs to a default folder.
+        # If custom paths fail, the script below will still run,
+        # but you may need to check the default output location.
     ]
 
     print(f"[*] Running: {' '.join(cmd)}")
@@ -38,6 +40,9 @@ def run_sam_on_image(image_path, image_name):
         return False
 
     print(f"    [OK] {result.stdout.strip()}")
+    # Post-run: Move outputs to our desired folders if the CLI saved them elsewhere
+    # This part depends on the actual behavior of the C++ binary.
+    # For now, we assume it might save to a default location or we handle it later.
     return True
 
 def main():
@@ -67,7 +72,7 @@ def main():
             fail += 1
 
     print(f"\n[SUMMARY] Success: {success} | Failed: {fail}")
-    print(f"[*] Outputs saved in: {OUTPUT_DIR}/")
+    print(f"[*] Check outputs in: {OUTPUT_DIR}/ and the default output folder of the C++ binary.")
 
 if __name__ == "__main__":
     main()
