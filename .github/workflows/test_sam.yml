@@ -39,10 +39,14 @@ jobs:
     - name: Fetch CPU Models
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        SAM3D_AUTO_FETCH: "1"
       run: |
         cd SAM3DBody-cpp
-        bash tools/fetch_model.sh shared cpu
+        bash tools/fetch_model.sh shared cpu shared --yes
+        echo "--- Contents of onnx/ ---"
         ls -lh onnx/ || true
+        echo "--- Contents of root ---"
+        ls -lh ./*.onnx ./*.gguf ./*.lbs ./*.bin 2>/dev/null || true
 
     - name: Build SAM3DBody-cpp (CPU-Only)
       run: |
