@@ -1,5 +1,4 @@
 import os
-import yaml
 import cv2
 import torch
 import gc
@@ -10,11 +9,36 @@ from insightface.app import FaceAnalysis
 from transformers import pipeline
 from diffusers import DiffusionPipeline, EulerAncestralDiscreteScheduler
 
-def load_config(config_path="config_multimodal.yml"):
-    with open(config_path, "r") as f:
-        return yaml.safe_load(f)
+# ==========================================
+# CONFIGURATION (Hardcoded for CI)
+# ==========================================
+CONFIG = {
+    "input_dir": "inputs",
+    "output_dir": "data/output",
+    "models": {
+        "depth": {
+            "model_id": "depth-anything/Depth-Anything-V2-Small-hf",
+            "device": "cpu"
+        },
+        "face": {
+            "model_name": "buffalo_l",
+            "device": "cpu"
+        },
+        "smpl": {
+            "model_path": "data/smpl/SMPL_NEUTRAL.pkl",
+            "device": "cpu"
+        },
+        "zero123": {
+            "model_id": "sudo-ai/zero123plus-v1.2",
+            "custom_pipeline": "sudo-ai/zero123plus-pipeline",
+            "num_inference_steps": 28,
+            "device": "cpu"
+        }
+    }
+}
 
 def setup_output_directories(output_dir):
+    """Creates the output directory and its subfolders if they don't exist."""
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(os.path.join(output_dir, "depth"), exist_ok=True)
     os.makedirs(os.path.join(output_dir, "face"), exist_ok=True)
@@ -23,12 +47,12 @@ def setup_output_directories(output_dir):
     return output_dir
 
 def free_memory():
-    """Force garbage collection to prevent OOM on GitHub runners."""
+    """Force garbage collection to prevent Out Of Memory (OOM) on GitHub runners."""
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-def process_single_image(input_path, output_dir, config):
+def process_single_image(input_path, output_dir):
     print(f"\n[*] Processing: {os.path.basename(input_path)}")
     image_bgr = cv2.imread(input_path)
     if image_bgr is None:
@@ -43,7 +67,7 @@ def process_single_image(input_path, output_dir, config):
     # ==========================================
     print("    -> Running Face Detection...")
     try:
-        face_app = FaceAnalysis(name=config["models"]["face"]["model_name"], providers=['CPUExecutionProvider'])
+        face_app = FaceAnalysis(name=CONFIG["models"]["face"]["model_name"], providers=['CPUExecutionProvider'])
         face_app.prepare(ctx_id=-1)
         faces = face_app.get(image_rgb)
         face_img = image_bgr.copy()
@@ -61,16 +85,15 @@ def process_single_image(input_path, output_dir, config):
     free_memory()
 
     # ==========================================
-    # 2. SMPL MESH GENERATION (Optional in CI)
+    # 2. SMPL MESH GENERATION (smplx + MediaPipe Proxy)
     # ==========================================
     print("    -> Checking SMPL Model...")
-    smpl_path = config["models"]["smpl"]["model_path"]
+    smpl_path = CONFIG["models"]["smpl"]["model_path"]
     if os.path.exists(smpl_path):
         try:
             import smplx
             smpl_model = smplx.create(model_path=smpl_path, model_type='smpl', gender='neutral', batch_size=1)
             
-            # MediaPipe Pose proxy
             mp_pose = mp.solutions.pose
             pose_detector = mp_pose.Pose(static_image_mode=True, min_detection_confidence=0.5)
             pose_results = pose_detector.process(image_rgb)
@@ -80,6 +103,8 @@ def process_single_image(input_path, output_dir, config):
                 output = smpl_model()
                 smpl_model.save_obj(output, os.path.join(output_dir, "smpl", "smpl_mesh.obj"))
                 print("        SMPL mesh saved.")
+            else:
+                print("        [WARNING] No pose landmarks detected for SMPL.")
         except Exception as e:
             print(f"        [WARNING] SMPL generation failed: {e}")
     else:
@@ -91,7 +116,7 @@ def process_single_image(input_path, output_dir, config):
     # ==========================================
     print("    -> Running Depth Estimation...")
     try:
-        depth_pipe = pipeline(task="depth-estimation", model=config["models"]["depth"]["model_id"], device=config["models"]["depth"]["device"])
+        depth_pipe = pipeline(task="depth-estimation", model=CONFIG["models"]["depth"]["model_id"], device=CONFIG["models"]["depth"]["device"])
         depth_result = depth_pipe(image_pil)
         depth_result["depth"].save(os.path.join(output_dir, "depth", "depth_map.png"))
         print("        Depth map saved.")
@@ -106,20 +131,20 @@ def process_single_image(input_path, output_dir, config):
     print("    -> Generating 6-View Grid (This is the slowest step)...")
     try:
         zero123_pipe = DiffusionPipeline.from_pretrained(
-            config["models"]["zero123"]["model_id"],
-            custom_pipeline=config["models"]["zero123"]["custom_pipeline"],
+            CONFIG["models"]["zero123"]["model_id"],
+            custom_pipeline=CONFIG["models"]["zero123"]["custom_pipeline"],
             torch_dtype=torch.float32
         )
         zero123_pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(
             zero123_pipe.scheduler.config, timestep_spacing='trailing'
         )
-        zero123_pipe.to(config["models"]["zero123"]["device"])
+        zero123_pipe.to(CONFIG["models"]["zero123"]["device"])
 
         input_square = image_pil.resize((512, 512), Image.Resampling.LANCZOS)
-        multiview_grid = zero123_pipe(input_square, num_inference_steps=config["models"]["zero123"]["num_inference_steps"]).images[0]
+        multiview_grid = zero123_pipe(input_square, num_inference_steps=CONFIG["models"]["zero123"]["num_inference_steps"]).images[0]
         multiview_grid.save(os.path.join(output_dir, "views", "multiview_grid.png"))
 
-        # Crop 6 views
+        # Crop the 2x3 grid into 6 separate views
         w, h = multiview_grid.size
         views = {
             'front': (0, 0, w//3, h//2), 'right': (w//3, 0, 2*w//3, h//2),
@@ -135,9 +160,8 @@ def process_single_image(input_path, output_dir, config):
     free_memory()
 
 def main():
-    config = load_config()
-    input_dir = config["input_dir"]
-    output_dir = config["output_dir"]
+    input_dir = CONFIG["input_dir"]
+    output_dir = CONFIG["output_dir"]
     
     if not os.path.exists(input_dir):
         os.makedirs(input_dir, exist_ok=True)
@@ -156,7 +180,7 @@ def main():
 
     for i, filename in enumerate(image_files):
         print(f"\n--- Processing Image {i+1}/{len(image_files)} ---")
-        process_single_image(os.path.join(input_dir, filename), output_dir, config)
+        process_single_image(os.path.join(input_dir, filename), output_dir)
 
     print(f"\n[SUCCESS] Processing complete! Check outputs in: {output_dir}")
 
