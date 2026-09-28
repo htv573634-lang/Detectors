@@ -29,21 +29,19 @@ jobs:
     - name: Install Hugging Face CLI
       run: pip install huggingface_hub
 
-    - name: Clone SAM3DBody-cpp
-      run: |
-        git clone https://github.com/AmmarkoV/SAM3DBody-cpp.git
-        cd SAM3DBody-cpp
+    - name: Login to Hugging Face
+      run: huggingface-cli login --token ${{ secrets.HF_TOKEN }}
 
-    - name: Download CPU-Compatible ONNX Models
-      env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    - name: Clone SAM3DBody-cpp
+      run: git clone https://github.com/AmmarkoV/SAM3DBody-cpp.git
+
+    - name: Download CPU Models
       run: |
         cd SAM3DBody-cpp
         mkdir -p onnx
         hf download AmmarkoV/SAM3DBody-cpp-onnx-models \
-          --include "backbone_fp32.onnx*" "decoder_fp16.onnx*" \
-          --local-dir ./onnx \
-          --token $HF_TOKEN
+          --exclude "backbone_fp32.onnx" \
+          --local-dir ./onnx
 
     - name: Build SAM3DBody-cpp (CPU-Only)
       run: |
@@ -52,7 +50,7 @@ jobs:
         cmake .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=OFF
         make -j$(nproc)
 
-    - name: Run SAM Pipeline on Inputs
+    - name: Run SAM Pipeline
       run: python test_sam.py
 
     - name: Upload Output Artifacts
