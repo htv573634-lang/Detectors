@@ -2,7 +2,6 @@ import os
 import subprocess
 import glob
 import shutil
-import time
 
 INPUT_DIR = os.path.abspath("inputs")
 OUTPUT_DIR = os.path.abspath("out_sam")
@@ -14,7 +13,6 @@ def setup_dirs():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 def snapshot_sam_dir():
-    """Record existing files in SAM_DIR before running."""
     files = set()
     for f in glob.glob(os.path.join(SAM_DIR, "**", "*"), recursive=True):
         if os.path.isfile(f):
@@ -22,19 +20,16 @@ def snapshot_sam_dir():
     return files
 
 def collect_new_files(before, stem):
-    """Copy any new file created in SAM_DIR into out_sam/<stem>_<filename>."""
     after = snapshot_sam_dir()
     new_files = after - before
     if not new_files:
         print("    [WARN] No new output files detected.")
         return
     for f in new_files:
-        # Skip model files, source files, and build artifacts
-        if any(skip in f for skip in ["/onnx/", "/build/", "/src/", "/include/", ".onnx", ".gguf", ".lbs", ".bin"]):
+        if any(skip in f for skip in ["/onnx/", "/build/", "/src/", "/include/", ".onnx", ".gguf", ".lbs", ".bin", ".tri"]):
             continue
-        # Only keep common output extensions
         ext = os.path.splitext(f)[1].lower()
-        if ext not in (".obj", ".bvh", ".json", ".ply", ".glb", ".gltf", ".fbx", ".npz", ".npy", ".txt", ".mtl"):
+        if ext not in (".obj", ".bvh", ".json", ".ply", ".glb", ".gltf", ".fbx", ".npz", ".npy", ".csv", ".txt", ".mtl"):
             continue
         base = os.path.basename(f)
         dest = os.path.join(OUTPUT_DIR, f"{stem}_{base}")
@@ -45,27 +40,24 @@ def run_sam_on_image(image_path, image_name):
     stem = os.path.splitext(image_name)[0]
     rel_image_path = os.path.relpath(image_path, SAM_DIR)
 
-    # Ensure binary is executable
-    if not os.path.isfile(SAM_BINARY):
-        print(f"    [ERROR] Binary not found: {SAM_BINARY}")
-        # Try to find any executable in build/
-        candidates = glob.glob(os.path.join(SAM_DIR, "build", "*"))
-        candidates = [c for c in candidates if os.path.isfile(c) and os.access(c, os.X_OK)]
-        print(f"    Available executables in build/: {[os.path.basename(c) for c in candidates]}")
-        return False
+    bvh_out = os.path.join(OUTPUT_DIR, f"{stem}.bvh")
+    csv_out = os.path.join(OUTPUT_DIR, f"{stem}_keypoints.csv")
 
     cmd = [
         SAM_BINARY,
         "--from", rel_image_path,
         "--onnx-dir", ONNX_DIR,
-        "--cpu"
+        "--backbone", "backbone_fp32.onnx",   # <-- explicit, since our file has _fp32 suffix
+        "--cuda", "-1",                        # <-- -1 = CPU (NOT --cpu)
+        "--bvh", bvh_out,
+        "-o", csv_out,
+        "--headless"                           # <-- no GUI window
     ]
 
     before = snapshot_sam_dir()
     print(f"[*] Running: {' '.join(cmd)} (cwd={SAM_DIR})")
     result = subprocess.run(cmd, capture_output=True, text=True, cwd=SAM_DIR)
 
-    # Always print stdout/stderr for debugging
     if result.stdout.strip():
         print(f"    [STDOUT]\n{result.stdout}")
     if result.stderr.strip():
@@ -87,14 +79,9 @@ def main():
         print(f"[!] Created {INPUT_DIR}. Add images and rerun.")
         return
 
-    # Debug: show what's in onnx/
     print(f"[*] ONNX directory: {ONNX_DIR}")
     if os.path.isdir(ONNX_DIR):
         print(f"    Contents: {os.listdir(ONNX_DIR)}")
-    else:
-        print(f"    [WARN] ONNX directory does not exist!")
-
-    # Debug: show binary
     print(f"[*] Binary: {SAM_BINARY}")
     print(f"    Exists: {os.path.isfile(SAM_BINARY)}")
 
