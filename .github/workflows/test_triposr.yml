@@ -82,6 +82,7 @@ jobs:
           grep -v torchmcubes TripoSR/requirements.txt > /tmp/reqs_nomcubes.txt || true
           pip install -r /tmp/reqs_nomcubes.txt
           pip install onnxruntime
+          pip install rembg
 
       - name: Memory check
         run: free -h && df -h /home/runner
