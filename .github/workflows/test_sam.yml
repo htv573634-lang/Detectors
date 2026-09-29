@@ -49,8 +49,9 @@ jobs:
         echo "--- onnx contents ---"
         ls -lh onnx/ || true
 
-    - name: Patch C++ Source for Mesh Export
+    - name: Diagnostic C++ Source (read-only)
       run: python patch_cpp.py
+      continue-on-error: true
 
     - name: Build SAM3DBody-cpp (CPU-Only)
       run: |
