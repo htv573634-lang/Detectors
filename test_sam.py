@@ -10,6 +10,8 @@ ONNX_DIR = os.path.join(SAM_DIR, "onnx")
 
 def setup_dirs():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    # CRITICAL: Create the directory where the C++ patch will write mesh.vertices
+    os.makedirs(os.path.join(SAM_DIR, "out_sam"), exist_ok=True)
 
 def run_sam_on_image(image_path, image_name):
     stem = os.path.splitext(image_name)[0]
@@ -39,16 +41,13 @@ def run_sam_on_image(image_path, image_name):
 
     print(f"    [OK] Exit code: 0")
 
-    # The C++ patch writes mesh.vertices inside SAM_DIR (relative path).
-    # Move it to out_sam/ if found.
+    # The C++ patch writes mesh.vertices inside SAM_DIR/out_sam/
     patched_verts = os.path.join(SAM_DIR, "out_sam", "mesh.vertices")
     if os.path.isfile(patched_verts):
         dest = os.path.join(OUTPUT_DIR, "mesh.vertices")
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
         os.replace(patched_verts, dest)
         print(f"    Moved mesh.vertices -> {dest}")
     else:
-        # Also check directly inside SAM_DIR
         direct = os.path.join(SAM_DIR, "mesh.vertices")
         if os.path.isfile(direct):
             dest = os.path.join(OUTPUT_DIR, "mesh.vertices")
