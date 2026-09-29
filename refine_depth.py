@@ -5,7 +5,6 @@ import trimesh
 from PIL import Image
 from transformers import pipeline
 
-# --- CONFIGURATION ---
 INPUT_MESH = "out_sam/test-2_mesh.obj"
 INPUT_IMAGE = "inputs/test-2.png"
 OUTPUT_MESH = "out_sam/test-2_mesh_refined.obj"
@@ -39,78 +38,89 @@ def refine_mesh(mesh_path, image_path):
     mesh = trimesh.load(mesh_path, force="mesh", process=False)
     if hasattr(mesh, "geometry"):
         mesh = trimesh.util.concatenate(tuple(mesh.geometry.values()))
-    
+
     original_verts = mesh.vertices.copy()
     mesh.fix_normals()
     normals = mesh.vertex_normals
     depth_map = get_depth_map(image_path)
 
-    # Project to 2D
-    verts_cam = original_verts - CAM_T
-    z_safe = np.clip(verts_cam[:, 2], 0.01, None)
-    u = (verts_cam[:, 0] / z_safe) * FOCAL_LENGTH + CX
-    v = -(verts_cam[:, 1] / z_safe) * FOCAL_LENGTH + CY
-    
-    # --- DEBUG 1: Projection Stats ---
+    # --- CORRECTED PROJECTION ---
+    # In MHR/OpenGL camera space:
+    #   x_view = verts_x + CAM_T[0]
+    #   y_view = verts_y - CAM_T[1]
+    #   z_view = verts_z - CAM_T[2]   (negative for objects in front of camera)
+    # distance from camera = -z_view
+    x_view = original_verts[:, 0] + CAM_T[0]
+    y_view = original_verts[:, 1] - CAM_T[1]
+    z_view = original_verts[:, 2] - CAM_T[2]
+
+    print("\n========== DEBUG: CAMERA SPACE ==========")
+    print(f"x_view range: {x_view.min():.4f} to {x_view.max():.4f}")
+    print(f"y_view range: {y_view.min():.4f} to {y_view.max():.4f}")
+    print(f"z_view range: {z_view.min():.4f} to {z_view.max():.4f}")
+
+    # Distance from camera (positive when object is in front)
+    distance = -z_view
+    # Guard against points that are behind or right at the camera
+    valid_mask = distance > 0.1
+
+    # Perspective projection
+    u = (x_view / np.where(valid_mask, distance, 1.0)) * FOCAL_LENGTH + CX
+    v = -(y_view / np.where(valid_mask, distance, 1.0)) * FOCAL_LENGTH + CY
+
     print("\n========== DEBUG: PROJECTION ==========")
-    print(f"Projected U range: {u.min():.2f} to {u.max():.2f}")
-    print(f"Projected V range: {v.min():.2f} to {v.max():.2f}")
-    
-    # FIX 1: Create a valid mask to exclude bad projections
-    valid_mask = (u >= 0) & (u < IMG_SIZE) & (v >= 0) & (v < IMG_SIZE) & (z_safe > 0.5)
-    print(f"Valid vertices for depth sampling: {valid_mask.sum()} / {len(verts_cam)}")
-    
+    print(f"u range (valid): {u[valid_mask].min():.2f} to {u[valid_mask].max():.2f}")
+    print(f"v range (valid): {v[valid_mask].min():.2f} to {v[valid_mask].max():.2f}")
+
+    # Only keep vertices projecting into the image
+    valid_mask &= (u >= 0) & (u < IMG_SIZE) & (v >= 0) & (v < IMG_SIZE)
+    print(f"Valid vertices: {valid_mask.sum()} / {len(original_verts)}")
+
+    if valid_mask.sum() == 0:
+        print("[ERROR] No valid projections. Falling back to copying mesh unchanged.")
+        mesh.export(OUTPUT_MESH)
+        return
+
     u_idx = np.clip(u.astype(int), 0, IMG_SIZE - 1)
     v_idx = np.clip(v.astype(int), 0, IMG_SIZE - 1)
-    
     sampled_depth = depth_map[v_idx, u_idx]
-    
-    # FIX 2: Normalize sampled depth to 0-1 range
+
+    # Normalize sampled depth using only valid vertices
     sd_valid = sampled_depth[valid_mask]
     sd_min, sd_max = sd_valid.min(), sd_valid.max()
     sampled_depth_norm = (sampled_depth - sd_min) / (sd_max - sd_min + 1e-8)
-    
-    print(f"Sampled depth range (valid): {sd_min:.4f} to {sd_max:.4f}")
 
-    # --- DEBUG 2: Linear Regression on valid vertices only ---
-    print("\n========== DEBUG: LINEAR REGRESSION ==========")
-    mesh_z_valid = verts_cam[valid_mask, 2]
-    
+    # Linear regression: target_z = a * depth_norm + b
+    mesh_z_valid = z_view[valid_mask]
     A = np.vstack([sampled_depth_norm[valid_mask], np.ones(valid_mask.sum())]).T
     a, b = np.linalg.lstsq(A, mesh_z_valid, rcond=None)[0]
-    
-    print(f"Coefficient a (scale): {a:.6f}")
-    print(f"Coefficient b (shift): {b:.6f}")
-    print(f"Interpretation: target_z = {a:.4f} * depth_norm + {b:.4f}")
-    
+
+    print("\n========== DEBUG: REGRESSION ==========")
+    print(f"a = {a:.6f}, b = {b:.6f}")
+
     target_z = a * sampled_depth_norm + b
-    
-    # Keep original Z for invalid vertices
-    target_z[~valid_mask] = verts_cam[~valid_mask, 2]
-    
-    raw_z_disp = (target_z - verts_cam[:, 2]) * DEPTH_WEIGHT
-    raw_z_disp = np.clip(raw_z_disp, -0.05, 0.05)
-    
-    # --- DEBUG 3: Displacement Stats ---
+    target_z[~valid_mask] = z_view[~valid_mask]
+
+    raw_z_disp = (target_z - z_view) * DEPTH_WEIGHT
+    raw_z_disp = np.clip(raw_z_disp, -0.1, 0.1)
+
     print("\n========== DEBUG: DISPLACEMENT ==========")
-    print(f"Raw Z displacement min: {raw_z_disp.min():.6f}")
-    print(f"Raw Z displacement max: {raw_z_disp.max():.6f}")
-    print(f"Raw Z displacement mean: {raw_z_disp.mean():.6f}")
-    print(f"Raw Z displacement std: {raw_z_disp.std():.6f}")
+    print(f"min: {raw_z_disp.min():.6f}, max: {raw_z_disp.max():.6f}")
+    print(f"mean: {raw_z_disp.mean():.6f}, std: {raw_z_disp.std():.6f}")
 
-    depth_refined_verts = original_verts.copy()
-    depth_refined_verts[:, 2] += raw_z_disp
+    # Apply displacement to camera-frame z, then convert back to world coordinates.
+    # z_view_new = z_view + raw_z_disp
+    # z_world_new = z_view_new + CAM_T[2]
+    refined_verts = original_verts.copy()
+    refined_verts[:, 2] = z_view + raw_z_disp + CAM_T[2]
 
-    # FIX 3: Masking normals to preserve back volume
-    facing_camera = np.clip(-normals[:, 2], 0, 1)
-    facing_camera = facing_camera ** 2.0 
-    
-    # Ensure invalid vertices keep original Z
+    # Blend based on facing direction (front gets full displacement, back keeps volume)
+    facing_camera = np.clip(-normals[:, 2], 0, 1) ** 2.0
     facing_camera[~valid_mask] = 0.0
-    
-    final_verts = (original_verts * (1 - facing_camera[:, None]) + 
-                   depth_refined_verts * facing_camera[:, None])
-    
+
+    final_verts = (original_verts * (1 - facing_camera[:, None]) +
+                   refined_verts * facing_camera[:, None])
+
     refined_mesh = trimesh.Trimesh(vertices=final_verts, faces=mesh.faces)
     trimesh.smoothing.filter_taubin(refined_mesh, lamb=0.1, nu=0.5, iterations=SMOOTH_ITER)
 
