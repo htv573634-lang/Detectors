@@ -16,24 +16,35 @@ CX, CY = 256.0, 256.0
 CAM_T = np.array([0.017, 0.571, 2.065])
 IMG_SIZE = 512
 
-DEPTH_WEIGHT = 0.8         # Amplified influence
+DEPTH_WEIGHT = 1.0         # Metric depth is in meters — full weight is safe
 SMOOTH_ITER = 3
-MIN_SCALE = 0.15           # Force minimum positive scale
+MIN_SCALE = 0.10           # Only used as a sanity floor if regression is degenerate
 
 def get_depth_map(image_path):
-    print("[*] Generating depth map with Depth Anything V2 Small...")
+    print("[*] Generating METRIC depth map with Depth Anything V2 Metric Indoor Small...")
     depth_pipe = pipeline(
         task="depth-estimation",
-        model="depth-anything/Depth-Anything-V2-Small-hf",
+        model="depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf",
         device="cpu"
     )
     img = Image.open(image_path).convert("RGB")
     depth = depth_pipe(img)["depth"]
     depth = np.array(depth, dtype=np.float32)
     depth = cv2.resize(depth, (IMG_SIZE, IMG_SIZE))
-    depth = (depth - depth.min()) / (depth.max() - depth.min() + 1e-8)
-    depth = cv2.bilateralFilter(depth, d=9, sigmaColor=0.1, sigmaSpace=10)
-    cv2.imwrite(OUTPUT_DEPTH_VIS, (depth * 255).astype(np.uint8))
+
+    print("\n========== DEBUG: DEPTH MAP (METRIC) ==========")
+    print(f"Shape: {depth.shape}")
+    print(f"Depth min (m): {depth.min():.4f}")
+    print(f"Depth max (m): {depth.max():.4f}")
+    print(f"Depth mean (m): {depth.mean():.4f}")
+    print(f"Depth std (m): {depth.std():.4f}")
+
+    # Light smoothing — do NOT normalize, values are already in meters
+    depth = cv2.bilateralFilter(depth, d=9, sigmaColor=0.05, sigmaSpace=10)
+
+    # Save visualization (normalized only for viewing)
+    depth_vis = ((depth - depth.min()) / (depth.max() - depth.min() + 1e-8) * 255).astype(np.uint8)
+    cv2.imwrite(OUTPUT_DEPTH_VIS, depth_vis)
     return depth
 
 def refine_mesh(mesh_path, image_path):
@@ -47,11 +58,7 @@ def refine_mesh(mesh_path, image_path):
     normals = mesh.vertex_normals
     depth_map = get_depth_map(image_path)
 
-    # 2. Correct camera convention
-    # x_view = x + cam_t[0]
-    # y_view = y + cam_t[1]
-    # z_view = z - cam_t[2]  (negative = in front of camera)
-    # distance = -z_view
+    # 2. Camera convention (confirmed by diagnostic)
     x_view = original_verts[:, 0] + CAM_T[0]
     y_view = original_verts[:, 1] + CAM_T[1]
     z_view = original_verts[:, 2] - CAM_T[2]
@@ -78,59 +85,56 @@ def refine_mesh(mesh_path, image_path):
     v_idx = np.clip(v.astype(int), 0, IMG_SIZE - 1)
     sampled_depth = depth_map[v_idx, u_idx]
 
-    # 3. Normalize sampled depth using valid vertices
+    print("\n========== DEBUG: SAMPLED DEPTH ==========")
     sd_valid = sampled_depth[valid_mask]
-    sd_min, sd_max = sd_valid.min(), sd_valid.max()
-    sampled_depth_norm = (sampled_depth - sd_min) / (sd_max - sd_min + 1e-8)
+    print(f"Sampled (valid) min: {sd_valid.min():.4f}")
+    print(f"Sampled (valid) max: {sd_valid.max():.4f}")
+    print(f"Sampled (valid) mean: {sd_valid.mean():.4f}")
 
-    # 4. Regression with FORCED POSITIVE slope
+    # 3. Regression: metric depth (meters) -> mesh z_view (meters)
+    # Both are linear, so a should be ~1.0
     mesh_z_valid = z_view[valid_mask]
-    A = np.vstack([sampled_depth_norm[valid_mask], np.ones(valid_mask.sum())]).T
+    A = np.vstack([sampled_depth[valid_mask], np.ones(valid_mask.sum())]).T
     a, b = np.linalg.lstsq(A, mesh_z_valid, rcond=None)[0]
 
     print("\n========== DEBUG: REGRESSION ==========")
     print(f"Raw regression: a = {a:.6f}, b = {b:.6f}")
 
-    # FORCE POSITIVE SLOPE
-    # The regression can come out negative due to occlusions, which inverts
-    # the depth map. We always want positive so:
-    #   high depth (closer) -> less negative z_view (forward)
-    if a < 0:
-        print(f"[FIX] Regression inverted (a={a:.6f}). Forcing positive.")
-        a = MIN_SCALE
-    elif abs(a) < MIN_SCALE:
-        a = MIN_SCALE
-        print(f"Forced minimum: a = {a:.6f}")
-    else:
-        print(f"Kept original: a = {a:.6f}")
+    # Safety: if regression collapses, use a fallback scale
+    if abs(a) < MIN_SCALE:
+        print(f"[WARN] Regression too small ({a:.6f}). Using fallback a = -1.0")
+        a = -1.0  # camera looks down -Z, so larger depth (farther) = more negative z
+        b = mesh_z_valid.mean() - a * sd_valid.mean()
+        print(f"Fallback: a = {a:.6f}, b = {b:.6f}")
 
-    target_z = a * sampled_depth_norm + b
+    target_z = a * sampled_depth + b
     target_z[~valid_mask] = z_view[~valid_mask]
 
     raw_z_disp = (target_z - z_view) * DEPTH_WEIGHT
-    raw_z_disp = np.clip(raw_z_disp, -0.15, 0.15)
+    raw_z_disp = np.clip(raw_z_disp, -0.20, 0.20)  # clamp to 20 cm
 
     print("\n========== DEBUG: DISPLACEMENT ==========")
-    print(f"min: {raw_z_disp.min():.6f}, max: {raw_z_disp.max():.6f}")
-    print(f"mean: {raw_z_disp.mean():.6f}, std: {raw_z_disp.std():.6f}")
+    print(f"min: {raw_z_disp.min():.6f}")
+    print(f"max: {raw_z_disp.max():.6f}")
+    print(f"mean: {raw_z_disp.mean():.6f}")
+    print(f"std: {raw_z_disp.std():.6f}")
 
-    # 5. Apply front displacement
+    # 4. Apply displacement in camera space
     refined_verts = original_verts.copy()
     refined_verts[:, 2] = z_view + raw_z_disp + CAM_T[2]
 
-    # 6. Blend front/back with smooth transition
-    facing_camera = np.clip(-normals[:, 2], 0, 1)  # 1.0 = front, 0.0 = back
-    facing_camera = facing_camera ** 1.5  # Smoother transition
+    # 5. Blend front/back based on facing direction
+    facing_camera = np.clip(-normals[:, 2], 0, 1)
+    facing_camera = facing_camera ** 1.5
 
     final_verts = (original_verts * (1 - facing_camera[:, None]) +
                    refined_verts * facing_camera[:, None])
 
-    # 7. Back stays as MHR template (no inflation)
-    # Hidden parts should remain generic - we have no data for them.
+    # 6. Back vertices stay as MHR template
     back_mask = facing_camera < 0.5
-    print(f"Kept {back_mask.sum()} back vertices at MHR template shape (no inflation)")
+    print(f"\nKept {back_mask.sum()} back vertices at MHR template shape (no inflation)")
 
-    # 8. Build and smooth
+    # 7. Build and smooth
     refined_mesh = trimesh.Trimesh(vertices=final_verts, faces=mesh.faces)
     trimesh.smoothing.filter_taubin(refined_mesh, lamb=0.1, nu=0.5, iterations=SMOOTH_ITER)
 
