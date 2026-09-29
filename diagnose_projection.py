@@ -31,8 +31,7 @@ if os.path.isfile(KEYPOINTS):
     with open(KEYPOINTS, "r") as f:
         header = f.readline().strip().split(",")
         row = f.readline().strip().split(",")
-    
-    # Skip frame and skeleton_id, get x,y,z triplets
+
     kp_vals = [float(v) for v in row[2:]]
     kp = np.array(kp_vals).reshape(-1, 3)
     print(f"Keypoints: {len(kp)}")
@@ -48,8 +47,6 @@ print("PROJECTION TESTS (looking for v in 0..512, u in 0..512)")
 print("="*70)
 
 def test_projection(name, x, y, z):
-    # Distance from camera in OpenGL convention (looking down -Z)
-    # Try distance = -z, distance = z, distance = z + cam_t, distance = -z + cam_t
     for d_name, dist in [
         ("d=-z",      -z),
         ("d=z",        z),
@@ -68,7 +65,6 @@ def test_projection(name, x, y, z):
             continue
         print(f"  [{name}] {d_name}: valid={both.sum():5d}  u=[{u[both].min():7.1f},{u[both].max():7.1f}]  v=[{v[both].min():7.1f},{v[both].max():7.1f}]")
 
-# Test various sign conventions on Y and Z translations
 tests = [
     ("raw",         verts[:,0],                      verts[:,1],                     verts[:,2]                    ),
     ("+t",          verts[:,0]+CAM_T[0],             verts[:,1]+CAM_T[1],            verts[:,2]+CAM_T[2]           ),
