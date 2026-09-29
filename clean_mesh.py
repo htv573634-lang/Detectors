@@ -8,7 +8,7 @@ OUTPUT_OBJ = "out_sam/test-2_mesh_hq.obj"
 
 def smooth_mesh():
     if not os.path.isfile(INPUT_OBJ):
-        print(f"[ERROR] {INPUT_OBJ} not found")
+        print(f"[ERROR] {INPUT_OBJ} not found. Skipping HQ generation.")
         return
 
     print(f"[*] Loading {INPUT_OBJ}")
@@ -23,13 +23,14 @@ def smooth_mesh():
     o3d_mesh.vertices = o3d.utility.Vector3dVector(tm.vertices)
     o3d_mesh.triangles = o3d.utility.Vector3iVector(tm.faces)
     
+    # Clean up geometry
     o3d_mesh.remove_degenerate_triangles()
     o3d_mesh.remove_duplicated_triangles()
     o3d_mesh.remove_duplicated_vertices()
     
-    # Taubin smoothing preserves volume much better than Laplacian
+    # Taubin smoothing (preserves volume, fixes spikes)
     print("[*] Applying Open3D Taubin smoothing...")
-    o3d_mesh = o3d_mesh.filter_smooth_taubin(number_of_iterations=10)
+    o3d_mesh = o3d_mesh.filter_smooth_taubin(number_of_iterations=8)
     o3d_mesh.compute_vertex_normals()
     
     tm_smooth = trimesh.Trimesh(
