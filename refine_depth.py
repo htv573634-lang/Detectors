@@ -16,7 +16,7 @@ CX, CY = 256.0, 256.0
 CAM_T = np.array([0.017, 0.571, 2.065])
 IMG_SIZE = 512
 
-DEPTH_WEIGHT = 0.4
+DEPTH_WEIGHT = 0.5
 SMOOTH_ITER = 3
 
 def get_depth_map(image_path):
@@ -45,78 +45,69 @@ def refine_mesh(mesh_path, image_path):
     normals = mesh.vertex_normals
     depth_map = get_depth_map(image_path)
 
-    # --- DEBUG 1: Depth Map Stats ---
-    print("\n========== DEBUG: DEPTH MAP ==========")
-    print(f"Depth map shape: {depth_map.shape}")
-    print(f"Depth min: {depth_map.min():.6f}")
-    print(f"Depth max: {depth_map.max():.6f}")
-    print(f"Depth mean: {depth_map.mean():.6f}")
-    print(f"Depth std: {depth_map.std():.6f}")
-
     # Project to 2D
     verts_cam = original_verts - CAM_T
     z_safe = np.clip(verts_cam[:, 2], 0.01, None)
     u = (verts_cam[:, 0] / z_safe) * FOCAL_LENGTH + CX
     v = -(verts_cam[:, 1] / z_safe) * FOCAL_LENGTH + CY
     
+    # --- DEBUG 1: Projection Stats ---
+    print("\n========== DEBUG: PROJECTION ==========")
+    print(f"Projected U range: {u.min():.2f} to {u.max():.2f}")
+    print(f"Projected V range: {v.min():.2f} to {v.max():.2f}")
+    
+    # FIX 1: Create a valid mask to exclude bad projections
+    valid_mask = (u >= 0) & (u < IMG_SIZE) & (v >= 0) & (v < IMG_SIZE) & (z_safe > 0.5)
+    print(f"Valid vertices for depth sampling: {valid_mask.sum()} / {len(verts_cam)}")
+    
     u_idx = np.clip(u.astype(int), 0, IMG_SIZE - 1)
     v_idx = np.clip(v.astype(int), 0, IMG_SIZE - 1)
     
     sampled_depth = depth_map[v_idx, u_idx]
     
-    # --- DEBUG 2: Projection Stats ---
-    print("\n========== DEBUG: PROJECTION ==========")
-    print(f"Projected U range: {u.min():.2f} to {u.max():.2f}")
-    print(f"Projected V range: {v.min():.2f} to {v.max():.2f}")
-    print(f"Sampled depth min: {sampled_depth.min():.6f}")
-    print(f"Sampled depth max: {sampled_depth.max():.6f}")
-    print(f"Sampled depth mean: {sampled_depth.mean():.6f}")
-    print(f"Percentage of vertices projecting into image bounds: {(sampled_depth > 0).mean() * 100:.2f}%")
-
-    # Align Depth to Mesh Z
-    mesh_z = verts_cam[:, 2]
+    # FIX 2: Normalize sampled depth to 0-1 range
+    sd_valid = sampled_depth[valid_mask]
+    sd_min, sd_max = sd_valid.min(), sd_valid.max()
+    sampled_depth_norm = (sampled_depth - sd_min) / (sd_max - sd_min + 1e-8)
     
-    # --- DEBUG 3: Mesh Z Stats ---
-    print("\n========== DEBUG: MESH Z ==========")
-    print(f"Mesh Z min: {mesh_z.min():.6f}")
-    print(f"Mesh Z max: {mesh_z.max():.6f}")
-    print(f"Mesh Z mean: {mesh_z.mean():.6f}")
-    print(f"Mesh Z std: {mesh_z.std():.6f}")
+    print(f"Sampled depth range (valid): {sd_min:.4f} to {sd_max:.4f}")
 
-    A = np.vstack([sampled_depth, np.ones(len(sampled_depth))]).T
-    a, b = np.linalg.lstsq(A, mesh_z, rcond=None)[0]
-    
-    # --- DEBUG 4: Linear Regression ---
+    # --- DEBUG 2: Linear Regression on valid vertices only ---
     print("\n========== DEBUG: LINEAR REGRESSION ==========")
+    mesh_z_valid = verts_cam[valid_mask, 2]
+    
+    A = np.vstack([sampled_depth_norm[valid_mask], np.ones(valid_mask.sum())]).T
+    a, b = np.linalg.lstsq(A, mesh_z_valid, rcond=None)[0]
+    
     print(f"Coefficient a (scale): {a:.6f}")
     print(f"Coefficient b (shift): {b:.6f}")
-    print(f"Interpretation: target_z = {a:.4f} * depth + {b:.4f}")
+    print(f"Interpretation: target_z = {a:.4f} * depth_norm + {b:.4f}")
     
-    target_z = a * sampled_depth + b
+    target_z = a * sampled_depth_norm + b
     
-    raw_z_disp = (target_z - mesh_z) * DEPTH_WEIGHT
-    raw_z_disp = np.clip(raw_z_disp, -0.03, 0.03)
+    # Keep original Z for invalid vertices
+    target_z[~valid_mask] = verts_cam[~valid_mask, 2]
     
-    # --- DEBUG 5: Displacement Stats ---
+    raw_z_disp = (target_z - verts_cam[:, 2]) * DEPTH_WEIGHT
+    raw_z_disp = np.clip(raw_z_disp, -0.05, 0.05)
+    
+    # --- DEBUG 3: Displacement Stats ---
     print("\n========== DEBUG: DISPLACEMENT ==========")
     print(f"Raw Z displacement min: {raw_z_disp.min():.6f}")
     print(f"Raw Z displacement max: {raw_z_disp.max():.6f}")
     print(f"Raw Z displacement mean: {raw_z_disp.mean():.6f}")
     print(f"Raw Z displacement std: {raw_z_disp.std():.6f}")
-    print(f"Displacement clamped to ±0.03")
 
     depth_refined_verts = original_verts.copy()
     depth_refined_verts[:, 2] += raw_z_disp
 
+    # FIX 3: Masking normals to preserve back volume
     facing_camera = np.clip(-normals[:, 2], 0, 1)
     facing_camera = facing_camera ** 2.0 
     
-    # --- DEBUG 6: Normals Stats ---
-    print("\n========== DEBUG: NORMALS ==========")
-    print(f"Facing camera min: {facing_camera.min():.6f}")
-    print(f"Facing camera max: {facing_camera.max():.6f}")
-    print(f"Facing camera mean: {facing_camera.mean():.6f}")
-
+    # Ensure invalid vertices keep original Z
+    facing_camera[~valid_mask] = 0.0
+    
     final_verts = (original_verts * (1 - facing_camera[:, None]) + 
                    depth_refined_verts * facing_camera[:, None])
     
