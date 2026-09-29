@@ -33,7 +33,7 @@ jobs:
     - name: Install Python Packages
       run: |
         pip install huggingface_hub
-        pip install trimesh numpy scipy
+        pip install trimesh numpy scipy open3d
 
     - name: Clone SAM3DBody-cpp
       run: git clone https://github.com/AmmarkoV/SAM3DBody-cpp.git
@@ -61,11 +61,7 @@ jobs:
     - name: Run SAM Pipeline (Headless)
       run: xvfb-run -a python test_sam.py
 
-    - name: Combine Vertices and Faces into OBJ
-      run: python make_obj.py
-      continue-on-error: true
-
-    - name: Smooth and Subdivide Mesh (HQ)
+    - name: Smooth and Reconstruct Mesh (HQ)
       run: python clean_mesh.py
       continue-on-error: true
 
