@@ -48,6 +48,10 @@ jobs:
         echo "--- onnx contents ---"
         ls -lh onnx/ || true
 
+    - name: Find Face Data Offset in body_mesh.tri
+      run: python find_face_offset.py
+      continue-on-error: true
+
     - name: Patch C++ Source for Mesh Export
       run: python patch_cpp.py
 
@@ -60,10 +64,6 @@ jobs:
 
     - name: Run SAM Pipeline (Headless)
       run: xvfb-run -a python test_sam.py
-
-    - name: Diagnose body_mesh.tri Format
-      run: python diagnose_tri.py
-      continue-on-error: true
 
     - name: Smooth and Reconstruct Mesh (HQ)
       run: python clean_mesh.py
