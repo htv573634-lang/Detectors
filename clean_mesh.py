@@ -1,9 +1,10 @@
 import os
 import trimesh
+import open3d as o3d
+import numpy as np
 
 INPUT_OBJ = "out_sam/test-2_mesh_refined.obj"
 OUTPUT_OBJ = "out_sam/test-2_mesh_hq.obj"
-NORMAL_MAP = "out_sam/test-2_depth_vis.png"
 
 def smooth_mesh():
     if not os.path.isfile(INPUT_OBJ):
@@ -17,11 +18,27 @@ def smooth_mesh():
 
     print(f"[*] Input: {len(tm.vertices)} verts, {len(tm.faces)} faces")
 
-    # VERY light smoothing (1 iteration) to preserve depth curves
-    trimesh.smoothing.filter_taubin(tm, lamb=0.1, nu=0.5, iterations=1)
-
-    # Subdivide twice for smooth rendering
-    sub = tm.subdivide()
+    # Convert to Open3D for better smoothing
+    o3d_mesh = o3d.geometry.TriangleMesh()
+    o3d_mesh.vertices = o3d.utility.Vector3dVector(tm.vertices)
+    o3d_mesh.triangles = o3d.utility.Vector3iVector(tm.faces)
+    
+    o3d_mesh.remove_degenerate_triangles()
+    o3d_mesh.remove_duplicated_triangles()
+    o3d_mesh.remove_duplicated_vertices()
+    
+    # Taubin smoothing preserves volume much better than Laplacian
+    print("[*] Applying Open3D Taubin smoothing...")
+    o3d_mesh = o3d_mesh.filter_smooth_taubin(number_of_iterations=10)
+    o3d_mesh.compute_vertex_normals()
+    
+    tm_smooth = trimesh.Trimesh(
+        vertices=np.asarray(o3d_mesh.vertices),
+        faces=np.asarray(o3d_mesh.triangles)
+    )
+    
+    # Subdivide twice for high poly count
+    sub = tm_smooth.subdivide()
     sub = sub.subdivide()
     print(f"[*] Subdivided: {len(sub.vertices)} verts, {len(sub.faces)} faces")
 
