@@ -18,7 +18,7 @@ CAM_T = np.array([0.017, 0.571, 2.065])
 IMG_SIZE = 512
 
 # Displacement tuning
-DEPTH_WEIGHT = 0.4       # Higher weight since we are now masking properly
+DEPTH_WEIGHT = 0.5       # How much to trust the depth map
 SMOOTH_ITER = 3
 
 def get_depth_map(image_path):
@@ -33,10 +33,7 @@ def get_depth_map(image_path):
     depth = np.array(depth, dtype=np.float32)
     depth = cv2.resize(depth, (IMG_SIZE, IMG_SIZE))
     
-    # Normalize 0-1
     depth = (depth - depth.min()) / (depth.max() - depth.min() + 1e-8)
-    
-    # Smooth the depth map to remove concentric rings
     depth = cv2.bilateralFilter(depth, d=9, sigmaColor=0.1, sigmaSpace=10)
     
     depth_vis = (depth * 255).astype(np.uint8)
@@ -44,26 +41,27 @@ def get_depth_map(image_path):
     return depth
 
 def refine_mesh(mesh_path, image_path):
-    # 1. Load mesh
+    # 1. Load original MHR mesh (which has correct volume on the back)
     mesh = trimesh.load(mesh_path, force="mesh", process=False)
     if hasattr(mesh, "geometry"):
         mesh = trimesh.util.concatenate(tuple(mesh.geometry.values()))
     print(f"[*] Loaded mesh: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
 
-    # 2. Get smoothed depth map
+    original_verts = mesh.vertices.copy()
+    mesh.fix_normals()
+    normals = mesh.vertex_normals
+
+    # 2. Get depth map
     depth_map = get_depth_map(image_path)
 
-    # 3. Project mesh vertices to 2D (Perspective projection)
-    verts = mesh.vertices.copy()
-    verts_cam = verts - CAM_T
-    
+    # 3. Project vertices to 2D
+    verts_cam = original_verts - CAM_T
     z_safe = np.clip(verts_cam[:, 2], 0.01, None)
     u = (verts_cam[:, 0] / z_safe) * FOCAL_LENGTH + CX
     v = -(verts_cam[:, 1] / z_safe) * FOCAL_LENGTH + CY
     
     u_idx = np.clip(u.astype(int), 0, IMG_SIZE - 1)
     v_idx = np.clip(v.astype(int), 0, IMG_SIZE - 1)
-    
     sampled_depth = depth_map[v_idx, u_idx]
     
     # 4. Align Depth to Mesh Z
@@ -72,30 +70,28 @@ def refine_mesh(mesh_path, image_path):
     a, b = np.linalg.lstsq(A, mesh_z, rcond=None)[0]
     target_z = a * sampled_depth + b
     
-    # 5. Compute raw displacement
+    # 5. Compute raw displacement along Z
     raw_z_disp = (target_z - mesh_z) * DEPTH_WEIGHT
     
-    # 6. CRITICAL FIX: Mask displacement to front-facing vertices only
-    # Get vertex normals in camera space (normals don't need translation, only rotation)
-    # The MHR model provides normals, but we can calculate them if missing.
-    mesh.fix_normals()
-    normals = mesh.vertex_normals
+    # Clamp displacement to prevent spikes
+    raw_z_disp = np.clip(raw_z_disp, -0.05, 0.05)
     
-    # In camera space, the camera looks down the -Z axis. 
-    # Front-facing vertices have normals pointing towards the camera (negative Z component).
-    # We use the dot product of the normal with the camera direction [0,0,-1]
-    # to get a weight between 0 and 1.
+    # 6. Create the fully refined mesh (front-corrected)
+    depth_refined_verts = original_verts.copy()
+    depth_refined_verts[:, 2] += raw_z_disp
+
+    # 7. CRITICAL FIX: Volumetric Blending
+    # facing_camera: 1.0 for front, 0.0 for back
     facing_camera = np.clip(-normals[:, 2], 0, 1)
     
-    # Apply the mask: Only front-facing vertices get displaced.
-    masked_z_disp = raw_z_disp * facing_camera
-    
-    # 7. Apply displacement
-    refined_verts = verts.copy()
-    refined_verts[:, 2] += masked_z_disp
+    # Blend original (back) with refined (front)
+    # Back vertices (facing_camera=0) -> 100% original volume
+    # Front vertices (facing_camera=1) -> 100% depth refined
+    final_verts = (original_verts * (1 - facing_camera[:, None]) + 
+                   depth_refined_verts * facing_camera[:, None])
     
     # 8. Build new mesh and smooth lightly
-    refined_mesh = trimesh.Trimesh(vertices=refined_verts, faces=mesh.faces)
+    refined_mesh = trimesh.Trimesh(vertices=final_verts, faces=mesh.faces)
     trimesh.smoothing.filter_taubin(refined_mesh, lamb=0.1, nu=0.5, iterations=SMOOTH_ITER)
 
     os.makedirs(os.path.dirname(OUTPUT_MESH), exist_ok=True)
