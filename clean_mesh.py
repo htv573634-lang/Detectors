@@ -1,14 +1,14 @@
 import os
+import numpy as np
 import trimesh
 import open3d as o3d
-import numpy as np
 
-INPUT_OBJ = "out_sam/test-2_mesh_refined.obj"
+INPUT_OBJ = "out_sam/test-2_mesh.obj"
 OUTPUT_OBJ = "out_sam/test-2_mesh_hq.obj"
 
 def smooth_mesh():
     if not os.path.isfile(INPUT_OBJ):
-        print(f"[ERROR] {INPUT_OBJ} not found. Skipping HQ generation.")
+        print(f"[ERROR] {INPUT_OBJ} not found")
         return
 
     print(f"[*] Loading {INPUT_OBJ}")
@@ -16,32 +16,31 @@ def smooth_mesh():
     if hasattr(tm, "geometry"):
         tm = trimesh.util.concatenate(tuple(tm.geometry.values()))
 
-    print(f"[*] Input: {len(tm.vertices)} verts, {len(tm.faces)} faces")
+    print(f"[*] Input mesh: {len(tm.vertices)} vertices, {len(tm.faces)} faces")
 
-    # Convert to Open3D for better smoothing
+    tm.update_faces(tm.nondegenerate_faces())
+    tm.update_faces(tm.unique_faces())
+    tm.remove_unreferenced_vertices()
+    print(f"[*] After cleanup: {len(tm.vertices)} vertices, {len(tm.faces)} faces")
+
     o3d_mesh = o3d.geometry.TriangleMesh()
-    o3d_mesh.vertices = o3d.utility.Vector3dVector(tm.vertices)
-    o3d_mesh.triangles = o3d.utility.Vector3iVector(tm.faces)
-    
-    # Clean up geometry
-    o3d_mesh.remove_degenerate_triangles()
-    o3d_mesh.remove_duplicated_triangles()
-    o3d_mesh.remove_duplicated_vertices()
-    
-    # Taubin smoothing (preserves volume, fixes spikes)
+    o3d_mesh.vertices = o3d.utility.Vector3dVector(np.asarray(tm.vertices))
+    o3d_mesh.triangles = o3d.utility.Vector3iVector(np.asarray(tm.faces))
+
     print("[*] Applying Open3D Taubin smoothing...")
     o3d_mesh = o3d_mesh.filter_smooth_taubin(number_of_iterations=8)
     o3d_mesh.compute_vertex_normals()
-    
+
     tm_smooth = trimesh.Trimesh(
         vertices=np.asarray(o3d_mesh.vertices),
         faces=np.asarray(o3d_mesh.triangles)
     )
-    
-    # Subdivide twice for high poly count
+    print(f"[*] After smoothing: {len(tm_smooth.vertices)} vertices, {len(tm_smooth.faces)} faces")
+
     sub = tm_smooth.subdivide()
+    print(f"[*] After subdivide 1: {len(sub.vertices)} vertices, {len(sub.faces)} faces")
     sub = sub.subdivide()
-    print(f"[*] Subdivided: {len(sub.vertices)} verts, {len(sub.faces)} faces")
+    print(f"[*] After subdivide 2: {len(sub.vertices)} vertices, {len(sub.faces)} faces")
 
     os.makedirs(os.path.dirname(OUTPUT_OBJ), exist_ok=True)
     sub.export(OUTPUT_OBJ)
