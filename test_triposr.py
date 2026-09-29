@@ -21,10 +21,12 @@ log = logging.getLogger(__name__)
 # =====================================================
 INPUT_DIR = "inputs"
 OUTPUT_DIR = "out_triposr"
+MASK_DIR = os.path.join(OUTPUT_DIR, "masks")
 TARGET_SIZE = 256
 CHUNK_SIZE = 8192
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(MASK_DIR, exist_ok=True)
 
 # =====================================================
 # FIND IMAGE
@@ -67,6 +69,57 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 log.info("Device: " + device)
 
 # =====================================================
+# HUMAN MASK DETECTION (rembg -> fallback threshold)
+# =====================================================
+def detect_foreground_mask(img_rgb):
+    """
+    Returns a uint8 mask (0 or 255) where 255 = foreground (person/object).
+    Tries rembg (U2-Net) first, falls back to threshold if unavailable.
+    """
+    h, w = img_rgb.shape[:2]
+    # --- Try rembg ---
+    try:
+        from rembg import remove, new_session
+        log.info("[*] Using rembg for foreground detection...")
+        # 'u2net_human_seg' is specifically trained for humans
+        # Use 'u2net' for general objects, 'u2net_human_seg' for people
+        session = new_session("u2net_human_seg")
+        pil_in = Image.fromarray(img_rgb).convert("RGB")
+        pil_out = remove(pil_in, session=session, only_mask=True,
+                         post_process_mask=True)
+        mask = np.array(pil_out.convert("L"), dtype=np.uint8)
+        # Remap to binary
+        mask = ((mask > 127) * 255).astype(np.uint8)
+        coverage = mask.mean() / 255.0 * 100
+        log.info("[OK] rembg mask: {:.1f}% coverage".format(coverage))
+        # Sanity: if rembg mask covers less than 2% or more than 98%, fall back
+        if 2.0 < coverage < 98.0:
+            return mask
+        log.warning("rembg mask coverage suspicious ({:.1f}%), falling back".format(coverage))
+    except Exception as e:
+        log.warning("rembg failed: " + str(e))
+
+    # --- Fallback: threshold-based ---
+    log.info("[*] Fallback: threshold-based mask")
+    gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+    # White background assumption
+    _, mask = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
+    # Clean up small noise
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    # Keep only the largest connected component
+    num_labels, labels = cv2.connectedComponents(mask)
+    if num_labels > 1:
+        largest = 1 + np.argmax([np.sum(labels == i) for i in range(1, num_labels)])
+        mask = ((labels == largest) * 255).astype(np.uint8)
+    if mask.mean() < 5:
+        log.warning("Fallback mask nearly empty, using full image")
+        mask = np.ones_like(mask) * 255
+    log.info("[OK] Threshold mask: {:.1f}% coverage".format(mask.mean() / 255.0 * 100))
+    return mask
+
+# =====================================================
 # PREPROCESS
 # =====================================================
 log.info("=" * 60)
@@ -80,10 +133,20 @@ if img_bgr is None:
                            cv2.COLOR_RGB2BGR)
 img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
-_, mask = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
-if mask.mean() < 5:
-    mask = np.ones_like(mask) * 255
+# --- Human mask detection ---
+mask = detect_foreground_mask(img_rgb)
+
+# Save mask for debugging
+mask_path = os.path.join(MASK_DIR, base_name + "_mask.png")
+cv2.imwrite(mask_path, mask)
+log.info("Mask saved: " + mask_path)
+
+# Optional: also save a background-removed RGB preview
+rgba_preview = np.dstack([img_rgb, mask])
+Image.fromarray(rgba_preview).save(
+    os.path.join(MASK_DIR, base_name + "_rgba.png"))
+
+# --- Composite onto grey background for TripoSR ---
 rgba = np.dstack([img_rgb, mask])
 pil_image = Image.fromarray(rgba)
 pil_image = resize_foreground(pil_image, 0.85)
@@ -92,6 +155,9 @@ img_np = np.array(pil_image).astype(np.float32) / 255.0
 img_comp = (img_np[:, :, :3] * img_np[:, :, 3:4]
             + (1 - img_np[:, :, 3:4]) * 0.5)
 img_final = Image.fromarray((img_comp * 255.0).astype(np.uint8))
+
+# Save the final composited image TripoSR will see
+img_final.save(os.path.join(MASK_DIR, base_name + "_composited.png"))
 
 log.info("Preprocessed image: " + str(pil_image.size))
 log.info("Preprocess time: " + str(round(time.time()-t0, 2)) + "s")
