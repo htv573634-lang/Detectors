@@ -13,11 +13,10 @@ OUTPUT_DEPTH_VIS = "out_sam/test-2_depth_vis.png"
 
 FOCAL_LENGTH = 718.9
 CX, CY = 256.0, 256.0
-CAM_T = np.array([0.017, 0.571, 2.065]) 
+CAM_T = np.array([0.017, 0.571, 2.065])
 IMG_SIZE = 512
 
-# LOWERED WEIGHT to prevent slicing the back
-DEPTH_WEIGHT = 0.3      
+DEPTH_WEIGHT = 0.4
 SMOOTH_ITER = 3
 
 def get_depth_map(image_path):
@@ -46,6 +45,14 @@ def refine_mesh(mesh_path, image_path):
     normals = mesh.vertex_normals
     depth_map = get_depth_map(image_path)
 
+    # --- DEBUG 1: Depth Map Stats ---
+    print("\n========== DEBUG: DEPTH MAP ==========")
+    print(f"Depth map shape: {depth_map.shape}")
+    print(f"Depth min: {depth_map.min():.6f}")
+    print(f"Depth max: {depth_map.max():.6f}")
+    print(f"Depth mean: {depth_map.mean():.6f}")
+    print(f"Depth std: {depth_map.std():.6f}")
+
     # Project to 2D
     verts_cam = original_verts - CAM_T
     z_safe = np.clip(verts_cam[:, 2], 0.01, None)
@@ -54,26 +61,62 @@ def refine_mesh(mesh_path, image_path):
     
     u_idx = np.clip(u.astype(int), 0, IMG_SIZE - 1)
     v_idx = np.clip(v.astype(int), 0, IMG_SIZE - 1)
+    
     sampled_depth = depth_map[v_idx, u_idx]
     
+    # --- DEBUG 2: Projection Stats ---
+    print("\n========== DEBUG: PROJECTION ==========")
+    print(f"Projected U range: {u.min():.2f} to {u.max():.2f}")
+    print(f"Projected V range: {v.min():.2f} to {v.max():.2f}")
+    print(f"Sampled depth min: {sampled_depth.min():.6f}")
+    print(f"Sampled depth max: {sampled_depth.max():.6f}")
+    print(f"Sampled depth mean: {sampled_depth.mean():.6f}")
+    print(f"Percentage of vertices projecting into image bounds: {(sampled_depth > 0).mean() * 100:.2f}%")
+
     # Align Depth to Mesh Z
     mesh_z = verts_cam[:, 2]
+    
+    # --- DEBUG 3: Mesh Z Stats ---
+    print("\n========== DEBUG: MESH Z ==========")
+    print(f"Mesh Z min: {mesh_z.min():.6f}")
+    print(f"Mesh Z max: {mesh_z.max():.6f}")
+    print(f"Mesh Z mean: {mesh_z.mean():.6f}")
+    print(f"Mesh Z std: {mesh_z.std():.6f}")
+
     A = np.vstack([sampled_depth, np.ones(len(sampled_depth))]).T
     a, b = np.linalg.lstsq(A, mesh_z, rcond=None)[0]
+    
+    # --- DEBUG 4: Linear Regression ---
+    print("\n========== DEBUG: LINEAR REGRESSION ==========")
+    print(f"Coefficient a (scale): {a:.6f}")
+    print(f"Coefficient b (shift): {b:.6f}")
+    print(f"Interpretation: target_z = {a:.4f} * depth + {b:.4f}")
+    
     target_z = a * sampled_depth + b
     
-    # Displacement with clamping
     raw_z_disp = (target_z - mesh_z) * DEPTH_WEIGHT
     raw_z_disp = np.clip(raw_z_disp, -0.03, 0.03)
     
+    # --- DEBUG 5: Displacement Stats ---
+    print("\n========== DEBUG: DISPLACEMENT ==========")
+    print(f"Raw Z displacement min: {raw_z_disp.min():.6f}")
+    print(f"Raw Z displacement max: {raw_z_disp.max():.6f}")
+    print(f"Raw Z displacement mean: {raw_z_disp.mean():.6f}")
+    print(f"Raw Z displacement std: {raw_z_disp.std():.6f}")
+    print(f"Displacement clamped to ±0.03")
+
     depth_refined_verts = original_verts.copy()
     depth_refined_verts[:, 2] += raw_z_disp
 
-    # Volumetric Blending (smooth transition from front to back)
     facing_camera = np.clip(-normals[:, 2], 0, 1)
-    # Apply a power curve to make the transition smoother, preserving volume on the sides
     facing_camera = facing_camera ** 2.0 
     
+    # --- DEBUG 6: Normals Stats ---
+    print("\n========== DEBUG: NORMALS ==========")
+    print(f"Facing camera min: {facing_camera.min():.6f}")
+    print(f"Facing camera max: {facing_camera.max():.6f}")
+    print(f"Facing camera mean: {facing_camera.mean():.6f}")
+
     final_verts = (original_verts * (1 - facing_camera[:, None]) + 
                    depth_refined_verts * facing_camera[:, None])
     
@@ -82,7 +125,7 @@ def refine_mesh(mesh_path, image_path):
 
     os.makedirs(os.path.dirname(OUTPUT_MESH), exist_ok=True)
     refined_mesh.export(OUTPUT_MESH)
-    print(f"[OK] Exported refined mesh to {OUTPUT_MESH}")
+    print(f"\n[OK] Exported refined mesh to {OUTPUT_MESH}")
 
 if __name__ == "__main__":
     refine_mesh(INPUT_MESH, INPUT_IMAGE)
