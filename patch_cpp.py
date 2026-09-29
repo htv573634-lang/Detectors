@@ -4,7 +4,6 @@ import sys
 ROOT = "SAM3DBody-cpp"
 
 def find_candidates():
-    """Find all .cpp files that contain the LBS/verts tokens."""
     candidates = []
     for dirpath, dirnames, filenames in os.walk(ROOT):
         if "/build" in dirpath or "/onnx" in dirpath or "/.git" in dirpath:
@@ -19,7 +18,6 @@ def find_candidates():
             except Exception:
                 continue
 
-            # Score by how many target tokens appear
             score = 0
             if "num_vertices" in content: score += 3
             if "verts[" in content:       score += 3
@@ -28,18 +26,12 @@ def find_candidates():
             if "fast_sam_3dbody" in content: score += 1
             if "mhr_lbs" in content:      score += 1
 
-            if score >= 4:  # must have several relevant tokens
+            if score >= 4:
                 candidates.append((path, score, content))
     return sorted(candidates, key=lambda x: -x[1])
 
 def patch_file(path, content):
-    """Insert the mesh export block after the LBS log line."""
-    # Try markers in order of preference
-    markers = [
-        '"skel="',
-        'skel=',
-        'num_vertices',
-    ]
+    markers = ['"skel="', 'skel=', 'num_vertices']
 
     insert_idx = -1
     used_marker = None
@@ -53,10 +45,9 @@ def patch_file(path, content):
     if insert_idx == -1:
         return None, "no marker found"
 
-    # Find the end of the statement (next `;` followed by newline)
     semi = content.find(";", insert_idx)
     if semi == -1:
-        return None, "no semicolon found after marker"
+        return None, "no semicolon after marker"
     nl = content.find("\n", semi)
     if nl == -1:
         nl = semi + 1
@@ -94,7 +85,7 @@ def main():
     candidates = find_candidates()
     if not candidates:
         print("[ERROR] No suitable .cpp file found containing LBS/verts tokens.")
-        print("        Dumping all .cpp files for inspection:")
+        print("        Listing all .cpp files for inspection:")
         for dirpath, dirnames, filenames in os.walk(ROOT):
             if "/build" in dirpath or "/.git" in dirpath:
                 continue
@@ -107,14 +98,12 @@ def main():
     for path, score, _ in candidates:
         print(f"    {path}  (score={score})")
 
-    # Patch the best candidate
     for path, score, content in candidates:
         marker, err = patch_file(path, content)
         if err:
             print(f"[SKIP] {path}: {err}")
             continue
         print(f"[OK] Patched {path} (marker='{marker}')")
-        # Ensure output dir exists inside SAM_DIR too
         os.makedirs(os.path.join(ROOT, "out_sam"), exist_ok=True)
         return
 
