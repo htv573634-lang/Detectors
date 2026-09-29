@@ -5,17 +5,21 @@ import trimesh
 from PIL import Image
 from transformers import pipeline
 
+# --- CONFIGURATION ---
 INPUT_MESH = "out_sam/test-2_mesh.obj"
 INPUT_IMAGE = "inputs/test-2.png"
 OUTPUT_MESH = "out_sam/test-2_mesh_refined.obj"
-OUTPUT_NORMAL_MAP = "out_sam/test-2_normal_map.png"
+OUTPUT_DEPTH_VIS = "out_sam/test-2_depth_vis.png"
 
-# Camera parameters from SAM3DBody log
+# Camera parameters from your SAM3DBody log
 FOCAL_LENGTH = 718.9
+CX, CY = 256.0, 256.0   # Image center (512x512)
+CAM_T = np.array([0.017, 0.571, 2.065]) # pred_cam_t from log
 IMG_SIZE = 512
-DEPTH_WEIGHT = 0.85       # trust the depth map more
-NORMAL_WEIGHT = 0.5       # how much to tilt normals
-SMOOTH_ITER = 5
+
+# Displacement tuning
+DEPTH_WEIGHT = 0.25      # Lowered significantly to prevent tearing
+SMOOTH_ITER = 3
 
 def get_depth_map(image_path):
     print("[*] Generating depth map with Depth Anything V2...")
@@ -28,35 +32,19 @@ def get_depth_map(image_path):
     depth = depth_pipe(img)["depth"]
     depth = np.array(depth, dtype=np.float32)
     depth = cv2.resize(depth, (IMG_SIZE, IMG_SIZE))
-    depth_norm = (depth - depth.min()) / (depth.max() - depth.min() + 1e-8)
-    return depth_norm
-
-def depth_to_normal_map(depth):
-    """Convert depth map to a normal map (curvature info)."""
-    print("[*] Computing normal map from depth gradient...")
-    grad_x = cv2.Sobel(depth, cv2.CV_32F, 1, 0, ksize=5)
-    grad_y = cv2.Sobel(depth, cv2.CV_32F, 0, 1, ksize=5)
-
-    # Normalize gradient strength
-    strength = 5.0
-    nx = -grad_x * strength
-    ny = -grad_y * strength
-    nz = np.ones_like(depth)
-
-    length = np.sqrt(nx*nx + ny*ny + nz*nz)
-    nx /= length
-    ny /= length
-    nz /= length
-
-    # Encode to RGB (0-255)
-    rgb = np.stack([(nx + 1) * 0.5, (ny + 1) * 0.5, (nz + 1) * 0.5], axis=-1)
-    rgb_uint8 = (rgb * 255).astype(np.uint8)
-
+    
+    # Normalize 0-1
+    depth = (depth - depth.min()) / (depth.max() - depth.min() + 1e-8)
+    
+    # CRITICAL FIX: Smooth the depth map to remove concentric rings
+    depth = cv2.bilateralFilter(depth, d=9, sigmaColor=0.1, sigmaSpace=10)
+    
     # Save visualization
-    cv2.imwrite(OUTPUT_NORMAL_MAP, cv2.cvtColor(rgb_uint8, cv2.COLOR_RGB2BGR))
-    print(f"[OK] Normal map saved: {OUTPUT_NORMAL_MAP}")
-
-    return nx, ny, nz
+    depth_vis = (depth * 255).astype(np.uint8)
+    cv2.imwrite(OUTPUT_DEPTH_VIS, depth_vis)
+    print(f"[OK] Depth map saved to {OUTPUT_DEPTH_VIS}")
+    
+    return depth
 
 def refine_mesh(mesh_path, image_path):
     # 1. Load mesh
@@ -65,58 +53,55 @@ def refine_mesh(mesh_path, image_path):
         mesh = trimesh.util.concatenate(tuple(mesh.geometry.values()))
     print(f"[*] Loaded mesh: {len(mesh.vertices)} verts, {len(mesh.faces)} faces")
 
-    # 2. Get depth + normal map
+    # 2. Get smoothed depth map
     depth_map = get_depth_map(image_path)
-    nx, ny, nz = depth_to_normal_map(depth_map)
 
-    # 3. Project mesh vertices to 2D (orthographic, front view)
+    # 3. Project mesh vertices to 2D using PERSPECTIVE projection
     verts = mesh.vertices.copy()
-
-    # Center and scale to image space
-    center = verts.mean(axis=0)
-    verts_c = verts - center
-    extent = np.abs(verts_c).max()
-    scale = (IMG_SIZE * 0.4) / extent
-    verts_s = verts_c * scale
-
-    u = np.clip((verts_s[:, 0] + IMG_SIZE/2).astype(int), 0, IMG_SIZE-1)
-    v = np.clip((verts_s[:, 1] + IMG_SIZE/2).astype(int), 0, IMG_SIZE-1)
-
-    # 4. Sample depth and normal at each vertex
-    sampled_depth = depth_map[v, u]
-    sampled_nx = nx[v, u]
-    sampled_ny = ny[v, u]
-    sampled_nz = nz[v, u]
-
-    # 5. Compute per-vertex normals of the mesh (for displacement direction)
-    mesh.fix_normals()
-    vertex_normals = mesh.vertex_normals
-
-    # 6. Compute displacement along the vertex normal, weighted by depth match
-    mesh_z_min, mesh_z_max = verts_s[:, 2].min(), verts_s[:, 2].max()
-    target_z = mesh_z_max - sampled_depth * (mesh_z_max - mesh_z_min)
-
-    # Displacement magnitude (blend Z-match with normal direction)
-    z_displacement = (target_z - verts_s[:, 2]) * DEPTH_WEIGHT
-
-    # Apply displacement along vertex normal, scaled by the z-displacement
-    # This gives curvature rather than flat pushing
-    displaced = verts_s + vertex_normals * z_displacement[:, None] * 0.5
-    # Also apply the pure Z push
-    displaced[:, 2] = verts_s[:, 2] + z_displacement
-
-    # 7. Rescale back to original coordinate frame
-    refined_verts = (displaced / scale) + center
-
-    # 8. Build new mesh
+    
+    # Translate to camera space (subtract camera position)
+    verts_cam = verts - CAM_T
+    
+    # Perspective projection formula
+    # Add a small epsilon to avoid division by zero
+    z_safe = np.clip(verts_cam[:, 2], 0.01, None)
+    u = (verts_cam[:, 0] / z_safe) * FOCAL_LENGTH + CX
+    v = -(verts_cam[:, 1] / z_safe) * FOCAL_LENGTH + CY
+    
+    # Clip to image bounds
+    u_idx = np.clip(u.astype(int), 0, IMG_SIZE - 1)
+    v_idx = np.clip(v.astype(int), 0, IMG_SIZE - 1)
+    
+    # 4. Sample depth at projected locations
+    sampled_depth = depth_map[v_idx, u_idx]
+    
+    # 5. Compute target Z displacement
+    # The depth map gives relative depth. We need to align it with the mesh's Z.
+    # We find the scale and shift that minimizes the difference.
+    mesh_z = verts_cam[:, 2]
+    
+    # Simple linear regression: target_z = a * depth + b
+    A = np.vstack([sampled_depth, np.ones(len(sampled_depth))]).T
+    a, b = np.linalg.lstsq(A, mesh_z, rcond=None)[0]
+    
+    target_z = a * sampled_depth + b
+    
+    # 6. Compute displacement along Z
+    z_displacement = (target_z - mesh_z) * DEPTH_WEIGHT
+    
+    # Apply displacement
+    refined_verts = verts.copy()
+    refined_verts[:, 2] += z_displacement
+    
+    # 7. Build new mesh
     refined_mesh = trimesh.Trimesh(vertices=refined_verts, faces=mesh.faces)
-
-    # 9. Gentle smoothing (much less than before)
-    trimesh.smoothing.filter_taubin(refined_mesh, lamb=0.2, nu=0.5, iterations=SMOOTH_ITER)
+    
+    # 8. Light smoothing to remove any new spikes
+    trimesh.smoothing.filter_taubin(refined_mesh, lamb=0.1, nu=0.5, iterations=SMOOTH_ITER)
 
     os.makedirs(os.path.dirname(OUTPUT_MESH), exist_ok=True)
     refined_mesh.export(OUTPUT_MESH)
-    print(f"[OK] Exported refined mesh: {OUTPUT_MESH}")
+    print(f"[OK] Exported refined mesh to {OUTPUT_MESH}")
 
 if __name__ == "__main__":
     refine_mesh(INPUT_MESH, INPUT_IMAGE)
