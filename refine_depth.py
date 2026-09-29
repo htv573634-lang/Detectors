@@ -1,4 +1,5 @@
 import os
+import glob
 import numpy as np
 import cv2
 import trimesh
@@ -6,7 +7,7 @@ from PIL import Image
 from transformers import pipeline
 
 INPUT_MESH = "out_sam/test-2_mesh.obj"
-INPUT_IMAGE = "inputs/test-2.png"
+INPUT_DIR = "inputs"
 OUTPUT_MESH = "out_sam/test-2_mesh_refined.obj"
 OUTPUT_DEPTH_VIS = "out_sam/test-2_depth_vis.png"
 
@@ -17,8 +18,21 @@ IMG_SIZE = 512
 DEPTH_FORCE = 0.08
 SMOOTH_ITER = 3
 
+def find_input_image():
+    """Auto-detect the newest image in inputs/ (same logic as test_sam.py)."""
+    exts = (".jpg", ".jpeg", ".jpge", ".png", ".bmp", ".webp", ".tif", ".tiff")
+    files = []
+    for ext in exts:
+        files.extend(glob.glob(os.path.join(INPUT_DIR, "*" + ext)))
+        files.extend(glob.glob(os.path.join(INPUT_DIR, "*" + ext.upper())))
+    files = [f for f in files if not os.path.basename(f).startswith(".")]
+    if not files:
+        raise FileNotFoundError(f"No image found in {INPUT_DIR}/")
+    files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return files[0]
+
 def get_depth_map(image_path):
-    print("[*] Generating depth map...")
+    print(f"[*] Generating depth map from: {image_path}")
     depth_pipe = pipeline(
         task="depth-estimation",
         model="depth-anything/Depth-Anything-V2-Small-hf",
@@ -70,11 +84,9 @@ def refine_mesh(mesh_path, image_path):
     print(f"[*] Displacement: min={displacement.min():.4f}, "
           f"max={displacement.max():.4f}, std={displacement.std():.4f}")
 
-    # Apply displacement in camera Z
     refined_verts = original_verts.copy()
     refined_verts[:, 2] = z_view + displacement + CAM_T[2]
 
-    # Blend: front gets full displacement, back unchanged
     facing_camera = np.clip(-normals[:, 2], 0, 1) ** 1.5
     final_verts = (original_verts * (1 - facing_camera[:, None]) +
                    refined_verts * facing_camera[:, None])
@@ -88,4 +100,5 @@ def refine_mesh(mesh_path, image_path):
     print(f"[OK] Exported {OUTPUT_MESH}")
 
 if __name__ == "__main__":
-    refine_mesh(INPUT_MESH, INPUT_IMAGE)
+    img = find_input_image()
+    refine_mesh(INPUT_MESH, img)
