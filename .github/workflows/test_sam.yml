@@ -36,6 +36,9 @@ jobs:
     - name: Clone SAM3DBody-cpp
       run: git clone https://github.com/AmmarkoV/SAM3DBody-cpp.git
 
+    - name: Find C++ Source Files
+      run: python find_src.py
+
     - name: Fetch CPU Models
       env:
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -46,8 +49,9 @@ jobs:
         echo "--- onnx contents ---"
         ls -lh onnx/ || true
 
-    - name: Patch C++ Source for Mesh Export
-      run: python patch_cpp.py
+    # TEMPORARILY DISABLED until we know the correct source path
+    # - name: Patch C++ Source for Mesh Export
+    #   run: python patch_cpp.py
 
     - name: Build SAM3DBody-cpp (CPU-Only)
       run: |
@@ -61,6 +65,7 @@ jobs:
 
     - name: Combine Vertices and Faces into OBJ
       run: python make_obj.py
+      continue-on-error: true
 
     - name: List Output Folder
       run: ls -lh out_sam/ || true
