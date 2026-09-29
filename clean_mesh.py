@@ -25,20 +25,20 @@ def poisson_reconstruct(verts):
 
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(verts)
-
     pcd.estimate_normals(
         search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.10, max_nn=30)
     )
     pcd.orient_normals_consistent_tangent_plane(30)
 
-    print("[*] Running Poisson reconstruction (depth=9)...")
+    # LOWER depth = less webbing between close body parts
+    print("[*] Running Poisson reconstruction (depth=7)...")
     mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-        pcd, depth=9
+        pcd, depth=7
     )
 
-    # Crop to original point cloud bbox to remove padding
+    # Aggressive crop to remove padding
     bbox = pcd.get_axis_aligned_bounding_box()
-    bbox = bbox.scale(1.05, bbox.get_center())
+    bbox = bbox.scale(1.0, bbox.get_center())  # NO expansion — cut tighter
     mesh = mesh.crop(bbox)
 
     mesh.remove_duplicated_vertices()
@@ -52,35 +52,47 @@ def poisson_reconstruct(verts):
         faces=np.asarray(mesh.triangles),
     )
 
+def remove_webbing(tm):
+    """Delete faces with extremely long edges (the bridge artifacts)."""
+    print("[*] Removing webbing (long-edge faces)...")
+    edge_lengths = tm.edges_unique_length
+    threshold = np.percentile(edge_lengths, 95) * 1.5
+
+    bad = []
+    for i, face in enumerate(tm.faces):
+        v0, v1, v2 = tm.vertices[face]
+        d1 = np.linalg.norm(v0 - v1)
+        d2 = np.linalg.norm(v1 - v2)
+        d3 = np.linalg.norm(v2 - v0)
+        if max(d1, d2, d3) > threshold:
+            bad.append(i)
+
+    if bad:
+        keep = np.setdiff1d(np.arange(len(tm.faces)), bad)
+        tm.update_faces(keep)
+        tm.remove_unreferenced_vertices()
+        print(f"[*] Removed {len(bad)} webbing faces")
+    else:
+        print("[*] No webbing detected")
+
 def smooth_mesh():
     if not os.path.isfile(RAW_VERTICES):
         print(f"[ERROR] {RAW_VERTICES} not found")
         return
 
-    print(f"[*] Loading raw vertices from {RAW_VERTICES}")
     verts = load_raw_vertices(RAW_VERTICES)
     print(f"[*] Loaded {len(verts)} vertices")
 
     tm = poisson_reconstruct(verts)
+    remove_webbing(tm)
 
-    # Handle Scene vs Trimesh
-    if hasattr(tm, "geometry"):
-        tm = trimesh.util.concatenate(tuple(tm.geometry.values()))
+    # Lighter smoothing (too much smoothing makes the mesh plastic-looking)
+    trimesh.smoothing.filter_taubin(tm, lamb=0.4, nu=0.5, iterations=5)
+    print("[*] Applied Taubin smoothing (lighter)")
 
-    print(f"[*] Input mesh: {len(tm.vertices)} vertices, {len(tm.faces)} faces")
-
-    # Taubin smoothing
-    trimesh.smoothing.filter_taubin(tm, lamb=0.5, nu=0.53, iterations=10)
-    print("[*] Applied Taubin smoothing")
-
-    # Subdivide twice for ~30 MB output
+    # SINGLE subdivision instead of two (webbing becomes more visible with each pass)
     sub = tm.subdivide()
-    print(f"[*] After subdivide 1: {len(sub.vertices)} vertices, {len(sub.faces)} faces")
-    sub = sub.subdivide()
-    print(f"[*] After subdivide 2: {len(sub.vertices)} vertices, {len(sub.faces)} faces")
-
-    # Light smoothing after subdivision
-    trimesh.smoothing.filter_taubin(sub, lamb=0.3, nu=0.5, iterations=3)
+    print(f"[*] After subdivide: {len(sub.vertices)} vertices, {len(sub.faces)} faces")
 
     os.makedirs(os.path.dirname(OUTPUT_OBJ), exist_ok=True)
     sub.export(OUTPUT_OBJ)
