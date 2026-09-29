@@ -30,15 +30,13 @@ def poisson_reconstruct(verts):
     )
     pcd.orient_normals_consistent_tangent_plane(30)
 
-    # LOWER depth = less webbing between close body parts
-    print("[*] Running Poisson reconstruction (depth=7)...")
+    print("[*] Running Poisson reconstruction (depth=8)...")
     mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-        pcd, depth=7
+        pcd, depth=8
     )
 
-    # Aggressive crop to remove padding
     bbox = pcd.get_axis_aligned_bounding_box()
-    bbox = bbox.scale(1.0, bbox.get_center())  # NO expansion — cut tighter
+    bbox = bbox.scale(1.02, bbox.get_center())
     mesh = mesh.crop(bbox)
 
     mesh.remove_duplicated_vertices()
@@ -52,29 +50,6 @@ def poisson_reconstruct(verts):
         faces=np.asarray(mesh.triangles),
     )
 
-def remove_webbing(tm):
-    """Delete faces with extremely long edges (the bridge artifacts)."""
-    print("[*] Removing webbing (long-edge faces)...")
-    edge_lengths = tm.edges_unique_length
-    threshold = np.percentile(edge_lengths, 95) * 1.5
-
-    bad = []
-    for i, face in enumerate(tm.faces):
-        v0, v1, v2 = tm.vertices[face]
-        d1 = np.linalg.norm(v0 - v1)
-        d2 = np.linalg.norm(v1 - v2)
-        d3 = np.linalg.norm(v2 - v0)
-        if max(d1, d2, d3) > threshold:
-            bad.append(i)
-
-    if bad:
-        keep = np.setdiff1d(np.arange(len(tm.faces)), bad)
-        tm.update_faces(keep)
-        tm.remove_unreferenced_vertices()
-        print(f"[*] Removed {len(bad)} webbing faces")
-    else:
-        print("[*] No webbing detected")
-
 def smooth_mesh():
     if not os.path.isfile(RAW_VERTICES):
         print(f"[ERROR] {RAW_VERTICES} not found")
@@ -84,13 +59,19 @@ def smooth_mesh():
     print(f"[*] Loaded {len(verts)} vertices")
 
     tm = poisson_reconstruct(verts)
-    remove_webbing(tm)
 
-    # Lighter smoothing (too much smoothing makes the mesh plastic-looking)
-    trimesh.smoothing.filter_taubin(tm, lamb=0.4, nu=0.5, iterations=5)
-    print("[*] Applied Taubin smoothing (lighter)")
+    # Lighter smoothing so we don't melt the body
+    trimesh.smoothing.filter_taubin(tm, lamb=0.3, nu=0.5, iterations=3)
+    print("[*] Applied Taubin smoothing (light)")
 
-    # SINGLE subdivision instead of two (webbing becomes more visible with each pass)
+    # --- HOLE FILLING ---
+    print("[*] Attempting to fill holes...")
+    tm.fill_holes()
+    # Also repair broken faces
+    tm.process(validate=True) 
+    print("[*] Holes filled and mesh repaired.")
+
+    # Single subdivision
     sub = tm.subdivide()
     print(f"[*] After subdivide: {len(sub.vertices)} vertices, {len(sub.faces)} faces")
 
