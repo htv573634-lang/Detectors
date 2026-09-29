@@ -67,6 +67,10 @@ jobs:
     - name: Combine Posed Vertices with Real Topology
       run: python make_obj.py
 
+    - name: Diagnose Projection Conventions
+      run: python diagnose_projection.py
+      continue-on-error: true
+
     - name: Refine Mesh with Depth Anything
       run: python refine_depth.py
       continue-on-error: true
