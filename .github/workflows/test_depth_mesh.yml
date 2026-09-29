@@ -1,0 +1,30 @@
+name: Test Depth Anything V2 Base to Mesh
+
+on:
+  workflow_dispatch:  # Manual trigger only
+
+jobs:
+  depth-mesh:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+
+    - name: Install Dependencies
+      run: |
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+        pip install transformers open3d numpy opencv-python-headless Pillow
+
+    - name: Run Depth to Mesh
+      run: python depth_to_mesh_base.py
+
+    - name: Upload Mesh
+      uses: actions/upload-artifact@v4
+      with:
+        name: depth-mesh-output
+        path: out_depth_mesh/
