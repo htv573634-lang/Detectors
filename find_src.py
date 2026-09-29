@@ -10,11 +10,10 @@ print(f"[*] Scanning {ROOT}/ for C++ source files...\n")
 
 hits = []
 for dirpath, dirnames, filenames in os.walk(ROOT):
-    # Skip build artifacts and model folders
     if "/build/" in dirpath or "/onnx/" in dirpath or "/.git/" in dirpath:
         continue
     for fn in filenames:
-        if fn.endswith((".cpp", ".cc", ".cxx")):
+        if fn.endswith((".cpp", ".cc", ".cxx", ".h", ".hpp")):
             full = os.path.join(dirpath, fn)
             size = os.path.getsize(full)
             hits.append((full, size))
@@ -22,10 +21,9 @@ for dirpath, dirnames, filenames in os.walk(ROOT):
 for path, size in sorted(hits):
     print(f"  {size:>10} bytes   {path}")
 
-print(f"\n[*] Total: {len(hits)} C++ files")
+print(f"\n[*] Total: {len(hits)} C++/header files")
 
-# Look for likely candidates containing our target tokens
-print("\n[*] Files containing 'LBS' or 'num_vertices' or 'skel=':\n")
+print("\n[*] Files containing key tokens:\n")
 for path, _ in hits:
     try:
         with open(path, "r", errors="ignore") as f:
@@ -33,10 +31,22 @@ for path, _ in hits:
     except Exception:
         continue
     tokens_found = []
-    for tok in ["LBS", "num_vertices", "skel=", "verts[", "fast_sam_3dbody"]:
+    for tok in ["LBS", "num_vertices", "skel=", "verts[", "fast_sam_3dbody", "mhr_lbs"]:
         if tok in content:
             tokens_found.append(tok)
     if tokens_found:
         print(f"  {path}  ->  {tokens_found}")
 
-print("\n[*] Done. Paste this output into the chat.")
+print("\n[*] Also checking top-level directory tree (depth 2):\n")
+for dirpath, dirnames, filenames in os.walk(ROOT):
+    depth = dirpath[len(ROOT):].count(os.sep)
+    if depth > 2 or "/.git" in dirpath or "/build" in dirpath:
+        dirnames[:] = []
+        continue
+    indent = "  " * depth
+    print(f"{indent}{os.path.basename(dirpath)}/")
+    if depth <= 1:
+        for fn in sorted(filenames)[:20]:
+            print(f"{indent}  {fn}")
+
+print("\n[*] Done. Paste this full output in chat.")
