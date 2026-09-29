@@ -48,8 +48,8 @@ jobs:
         echo "--- onnx contents ---"
         ls -lh onnx/ || true
 
-    - name: Find Face Data Offset in body_mesh.tri
-      run: python find_face_offset.py
+    - name: Dump LBS Header Definition
+      run: python dump_lbs_header.py
       continue-on-error: true
 
     - name: Patch C++ Source for Mesh Export
