@@ -33,7 +33,7 @@ jobs:
     - name: Install Python Packages
       run: |
         pip install huggingface_hub
-        pip install trimesh numpy scipy
+        pip install trimesh numpy scipy open3d
         pip install opencv-python-headless
         pip install Pillow
         pip install torch --index-url https://download.pytorch.org/whl/cpu
