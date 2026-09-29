@@ -44,27 +44,18 @@ def refine_mesh(mesh_path, image_path):
     normals = mesh.vertex_normals
     depth_map = get_depth_map(image_path)
 
-    # --- CORRECTED PROJECTION ---
-    # In MHR/OpenGL camera space:
-    #   x_view = verts_x + CAM_T[0]
-    #   y_view = verts_y - CAM_T[1]
-    #   z_view = verts_z - CAM_T[2]   (negative for objects in front of camera)
-    # distance from camera = -z_view
+    # --- CORRECT CAMERA CONVENTION (from diagnostic) ---
+    # x_view = x + cam_t[0]
+    # y_view = y + cam_t[1]
+    # z_view = z - cam_t[2]
+    # distance = -z_view
     x_view = original_verts[:, 0] + CAM_T[0]
-    y_view = original_verts[:, 1] - CAM_T[1]
+    y_view = original_verts[:, 1] + CAM_T[1]
     z_view = original_verts[:, 2] - CAM_T[2]
 
-    print("\n========== DEBUG: CAMERA SPACE ==========")
-    print(f"x_view range: {x_view.min():.4f} to {x_view.max():.4f}")
-    print(f"y_view range: {y_view.min():.4f} to {y_view.max():.4f}")
-    print(f"z_view range: {z_view.min():.4f} to {z_view.max():.4f}")
-
-    # Distance from camera (positive when object is in front)
     distance = -z_view
-    # Guard against points that are behind or right at the camera
     valid_mask = distance > 0.1
 
-    # Perspective projection
     u = (x_view / np.where(valid_mask, distance, 1.0)) * FOCAL_LENGTH + CX
     v = -(y_view / np.where(valid_mask, distance, 1.0)) * FOCAL_LENGTH + CY
 
@@ -72,25 +63,19 @@ def refine_mesh(mesh_path, image_path):
     print(f"u range (valid): {u[valid_mask].min():.2f} to {u[valid_mask].max():.2f}")
     print(f"v range (valid): {v[valid_mask].min():.2f} to {v[valid_mask].max():.2f}")
 
-    # Only keep vertices projecting into the image
     valid_mask &= (u >= 0) & (u < IMG_SIZE) & (v >= 0) & (v < IMG_SIZE)
     print(f"Valid vertices: {valid_mask.sum()} / {len(original_verts)}")
-
-    if valid_mask.sum() == 0:
-        print("[ERROR] No valid projections. Falling back to copying mesh unchanged.")
-        mesh.export(OUTPUT_MESH)
-        return
 
     u_idx = np.clip(u.astype(int), 0, IMG_SIZE - 1)
     v_idx = np.clip(v.astype(int), 0, IMG_SIZE - 1)
     sampled_depth = depth_map[v_idx, u_idx]
 
-    # Normalize sampled depth using only valid vertices
+    # Normalize using only valid vertices
     sd_valid = sampled_depth[valid_mask]
     sd_min, sd_max = sd_valid.min(), sd_valid.max()
     sampled_depth_norm = (sampled_depth - sd_min) / (sd_max - sd_min + 1e-8)
 
-    # Linear regression: target_z = a * depth_norm + b
+    # Regression to align depth with mesh Z
     mesh_z_valid = z_view[valid_mask]
     A = np.vstack([sampled_depth_norm[valid_mask], np.ones(valid_mask.sum())]).T
     a, b = np.linalg.lstsq(A, mesh_z_valid, rcond=None)[0]
@@ -108,13 +93,11 @@ def refine_mesh(mesh_path, image_path):
     print(f"min: {raw_z_disp.min():.6f}, max: {raw_z_disp.max():.6f}")
     print(f"mean: {raw_z_disp.mean():.6f}, std: {raw_z_disp.std():.6f}")
 
-    # Apply displacement to camera-frame z, then convert back to world coordinates.
-    # z_view_new = z_view + raw_z_disp
-    # z_world_new = z_view_new + CAM_T[2]
+    # Convert z_view displacement back to world Z
     refined_verts = original_verts.copy()
     refined_verts[:, 2] = z_view + raw_z_disp + CAM_T[2]
 
-    # Blend based on facing direction (front gets full displacement, back keeps volume)
+    # Front vertices get full displacement, back vertices keep MHR volume
     facing_camera = np.clip(-normals[:, 2], 0, 1) ** 2.0
     facing_camera[~valid_mask] = 0.0
 
