@@ -36,23 +36,8 @@ jobs:
         pip install trimesh numpy scipy open3d
         pip install opencv-python-headless
         pip install Pillow
-
-    - name: Inspect Input Image
-      run: |
-        echo "===== INPUT IMAGE DIAGNOSTIC ====="
-        ls -lh inputs/
-        python3 -c "
-        from PIL import Image
-        import glob
-        for f in glob.glob('inputs/*.*'):
-            try:
-                img = Image.open(f)
-                print(f'{f}: size={img.size}, mode={img.mode}, format={img.format}')
-            except Exception as e:
-                print(f'{f}: ERROR {e}')
-        "
-        echo "===== END INPUT DIAGNOSTIC ====="
-      continue-on-error: true
+        pip install torch --index-url https://download.pytorch.org/whl/cpu
+        pip install transformers
 
     - name: Clone SAM3DBody-cpp
       run: git clone https://github.com/AmmarkoV/SAM3DBody-cpp.git
@@ -66,16 +51,6 @@ jobs:
         bash tools/fetch_model.sh shared cpu shared --yes
         ls -lh onnx/
 
-    - name: Diagnose Correctives Loading
-      run: |
-        echo "===== CORRECTIVES DIAGNOSTIC ====="
-        ls -lh SAM3DBody-cpp/onnx/correctives.bin || echo "MISSING"
-        grep -n "mhr_correctives_load" SAM3DBody-cpp/src/core/fast_sam_3dbody.cpp || echo "NOT CALLED"
-        grep -n "correctives" SAM3DBody-cpp/src/core/fast_sam_3dbody.cpp || echo "NO REFERENCE"
-        grep -rn "mhr_correctives_load" SAM3DBody-cpp/src/ 2>/dev/null | head -10 || echo "NOT FOUND"
-        echo "===== END DIAGNOSTIC ====="
-      continue-on-error: true
-
     - name: Patch C++ Source for Mesh Export
       run: python patch_cpp.py
 
@@ -86,53 +61,26 @@ jobs:
         cmake .. -DCMAKE_BUILD_TYPE=Release -DUSE_CUDA=OFF
         make -j$(nproc)
 
-    - name: Run SAM Pipeline (Headless with Verbose Log)
-      run: |
-        echo "===== SAM3D RUNTIME LOG ====="
-        xvfb-run -a python test_sam.py 2>&1 | tee /tmp/sam_full_log.txt
-        echo "===== END RUNTIME LOG ====="
+    - name: Run SAM Pipeline (Headless)
+      run: xvfb-run -a python test_sam.py
 
-    - name: Capture SAM3D Runtime Messages
-      run: |
-        echo "===== SAM3D FILTERED RUNTIME MESSAGES ====="
-        grep -iE "corrective|LBS|body_model|loading|mhr_lbs|shape|verts|skel|pose" /tmp/sam_full_log.txt || echo "No matching lines"
-        echo "===== END FILTERED MESSAGES ====="
-      continue-on-error: true
-
-    - name: Combine Posed Vertices with Real Topology
+    - name: Combine Vertices + Faces (Upright)
       run: python make_obj.py
 
-    - name: Inspect Final Mesh Bounds
-      run: |
-        echo "===== FINAL MESH BOUNDS ====="
-        python3 -c "
-        import trimesh
-        m = trimesh.load('out_sam/test-2_mesh.obj', force='mesh', process=False)
-        print(f'Vertices: {len(m.vertices)}')
-        print(f'Faces: {len(m.faces)}')
-        print(f'X: {m.vertices[:,0].min():.4f} to {m.vertices[:,0].max():.4f}')
-        print(f'Y: {m.vertices[:,1].min():.4f} to {m.vertices[:,1].max():.4f}')
-        print(f'Z: {m.vertices[:,2].min():.4f} to {m.vertices[:,2].max():.4f}')
-        print(f'Watertight: {m.is_watertight}')
-        print(f'Euler number: {m.euler_number}')
-        "
-        echo "===== END BOUNDS ====="
+    - name: Refine with Depth Anything
+      run: python refine_depth.py
       continue-on-error: true
 
-    - name: List Output Folder
+    - name: Subdivide for High Quality
+      run: python clean_mesh.py
+      continue-on-error: true
+
+    - name: List Output
       run: ls -lh out_sam/ || true
 
-    - name: Upload Output Artifacts
+    - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: sam-output
         path: out_sam/
-        if-no-files-found: warn
-
-    - name: Upload Full Runtime Log
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: sam-runtime-log
-        path: /tmp/sam_full_log.txt
         if-no-files-found: warn
