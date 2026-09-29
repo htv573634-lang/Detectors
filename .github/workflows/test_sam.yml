@@ -33,7 +33,7 @@ jobs:
     - name: Install Python Packages
       run: |
         pip install huggingface_hub
-        pip install trimesh numpy scipy open3d
+        pip install trimesh numpy scipy
 
     - name: Clone SAM3DBody-cpp
       run: git clone https://github.com/AmmarkoV/SAM3DBody-cpp.git
@@ -45,12 +45,7 @@ jobs:
       run: |
         cd SAM3DBody-cpp
         bash tools/fetch_model.sh shared cpu shared --yes
-        echo "--- onnx contents ---"
-        ls -lh onnx/ || true
-
-    - name: Dump LBS Header Definition
-      run: python dump_lbs_header.py
-      continue-on-error: true
+        ls -lh onnx/
 
     - name: Patch C++ Source for Mesh Export
       run: python patch_cpp.py
@@ -65,7 +60,10 @@ jobs:
     - name: Run SAM Pipeline (Headless)
       run: xvfb-run -a python test_sam.py
 
-    - name: Smooth and Reconstruct Mesh (HQ)
+    - name: Combine Posed Vertices with Real Topology
+      run: python make_obj.py
+
+    - name: Smooth and Subdivide Mesh (HQ)
       run: python clean_mesh.py
       continue-on-error: true
 
