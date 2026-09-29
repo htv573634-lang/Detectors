@@ -34,7 +34,8 @@ jobs:
       run: |
         pip install huggingface_hub
         pip install trimesh numpy scipy
-        pip install transformers torch --index-url https://download.pytorch.org/whl/cpu
+        pip install torch --index-url https://download.pytorch.org/whl/cpu
+        pip install transformers
 
     - name: Clone SAM3DBody-cpp
       run: git clone https://github.com/AmmarkoV/SAM3DBody-cpp.git
