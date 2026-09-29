@@ -1,18 +1,19 @@
 import os
 import numpy as np
 
-RAW_VERTICES = "out_sam/mesh.vertices"      # posed vertices from LBS
-TRI_FILE = "SAM3DBody-cpp/onnx/body_mesh.tri" # topology
+RAW_VERTICES = "out_sam/mesh.vertices"
+TRI_FILE = "SAM3DBody-cpp/onnx/body_mesh.tri"
 OUTPUT_OBJ = "out_sam/test-2_mesh.obj"
 
 VERT_COUNT = 18439
 TRI_COUNT = 36874
 HEADER_SIZE = 144
-# indices start after header + vertices + normals
 INDEX_OFFSET = HEADER_SIZE + (VERT_COUNT * 3 * 4) * 2  # = 442680
 
+# Set this to True if the mesh appears upside down in your viewer
+FLIP_UPRIGHT = True
+
 def load_posed_vertices(path):
-    """Load the space-separated x y z file written by the C++ patch."""
     verts = []
     with open(path, "r") as f:
         for line in f:
@@ -28,7 +29,6 @@ def load_posed_vertices(path):
     return np.array(verts, dtype=np.float32)
 
 def load_indices(path):
-    """Read 36,874 int32 triplets from the .tri file at the known offset."""
     with open(path, "rb") as f:
         data = f.read()
     print(f"[*] .tri size: {len(data)} bytes")
@@ -49,7 +49,6 @@ def write_obj(verts, faces, out_path):
         for v in verts:
             f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
         for face in faces:
-            # OBJ is 1-indexed
             f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
     print(f"[OK] Wrote {out_path}")
 
@@ -69,6 +68,14 @@ def main():
 
     if len(verts) != VERT_COUNT:
         print(f"[WARN] Expected {VERT_COUNT} vertices, got {len(verts)}")
+
+    # Flip to upright orientation if requested
+    if FLIP_UPRIGHT:
+        print("[*] Flipping mesh 180 degrees around X-axis to make it upright...")
+        verts[:, 1] = -verts[:, 1]
+        verts[:, 2] = -verts[:, 2]
+        print(f"    New Y: {verts[:,1].min():.3f} to {verts[:,1].max():.3f}")
+        print(f"    New Z: {verts[:,2].min():.3f} to {verts[:,2].max():.3f}")
 
     faces = load_indices(TRI_FILE)
     write_obj(verts, faces, OUTPUT_OBJ)
