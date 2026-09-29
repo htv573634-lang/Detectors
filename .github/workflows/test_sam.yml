@@ -61,6 +61,10 @@ jobs:
     - name: Run SAM Pipeline (Headless)
       run: xvfb-run -a python test_sam.py
 
+    - name: Diagnose body_mesh.tri Format
+      run: python diagnose_tri.py
+      continue-on-error: true
+
     - name: Smooth and Reconstruct Mesh (HQ)
       run: python clean_mesh.py
       continue-on-error: true
