@@ -3,7 +3,7 @@ import trimesh
 
 INPUT_OBJ = "out_sam/test-2_mesh_refined.obj"
 OUTPUT_OBJ = "out_sam/test-2_mesh_hq.obj"
-NORMAL_MAP = "out_sam/test-2_normal_map.png"
+NORMAL_MAP = "out_sam/test-2_depth_vis.png"
 
 def smooth_mesh():
     if not os.path.isfile(INPUT_OBJ):
@@ -17,10 +17,10 @@ def smooth_mesh():
 
     print(f"[*] Input: {len(tm.vertices)} verts, {len(tm.faces)} faces")
 
-    # Light smoothing only — preserve curvature
-    trimesh.smoothing.filter_taubin(tm, lamb=0.2, nu=0.5, iterations=3)
+    # VERY light smoothing (1 iteration) to preserve depth curves
+    trimesh.smoothing.filter_taubin(tm, lamb=0.1, nu=0.5, iterations=1)
 
-    # TWO subdivisions for smooth curves (Catmull-Clark-like)
+    # Subdivide twice for smooth rendering
     sub = tm.subdivide()
     sub = sub.subdivide()
     print(f"[*] Subdivided: {len(sub.vertices)} verts, {len(sub.faces)} faces")
@@ -29,10 +29,6 @@ def smooth_mesh():
     sub.export(OUTPUT_OBJ)
     size_mb = os.path.getsize(OUTPUT_OBJ) / (1024 * 1024)
     print(f"[OK] Exported {OUTPUT_OBJ} ({size_mb:.2f} MB)")
-
-    # Report normal map availability for texture step
-    if os.path.isfile(NORMAL_MAP):
-        print(f"[*] Normal map available for use as texture: {NORMAL_MAP}")
 
 if __name__ == "__main__":
     smooth_mesh()
