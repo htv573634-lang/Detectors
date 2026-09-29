@@ -37,16 +37,4 @@ for path, _ in hits:
     if tokens_found:
         print(f"  {path}  ->  {tokens_found}")
 
-print("\n[*] Also checking top-level directory tree (depth 2):\n")
-for dirpath, dirnames, filenames in os.walk(ROOT):
-    depth = dirpath[len(ROOT):].count(os.sep)
-    if depth > 2 or "/.git" in dirpath or "/build" in dirpath:
-        dirnames[:] = []
-        continue
-    indent = "  " * depth
-    print(f"{indent}{os.path.basename(dirpath)}/")
-    if depth <= 1:
-        for fn in sorted(filenames)[:20]:
-            print(f"{indent}  {fn}")
-
-print("\n[*] Done. Paste this full output in chat.")
+print("\n[*] Done.")
