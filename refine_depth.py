@@ -16,10 +16,9 @@ CX, CY = 256.0, 256.0
 CAM_T = np.array([0.017, 0.571, 2.065])
 IMG_SIZE = 512
 
-DEPTH_WEIGHT = 0.8         # Amplified since we're forcing min scale
+DEPTH_WEIGHT = 0.8         # Amplified influence
 SMOOTH_ITER = 3
-MIN_SCALE = 0.15           # Force regression scale to be at least this
-BACK_INFLATE = 0.03        # Push back surface out by 3cm for volume
+MIN_SCALE = 0.15           # Force minimum positive scale
 
 def get_depth_map(image_path):
     print("[*] Generating depth map with Depth Anything V2 Small...")
@@ -48,10 +47,10 @@ def refine_mesh(mesh_path, image_path):
     normals = mesh.vertex_normals
     depth_map = get_depth_map(image_path)
 
-    # 2. Correct camera convention (from diagnostic)
+    # 2. Correct camera convention
     # x_view = x + cam_t[0]
     # y_view = y + cam_t[1]
-    # z_view = z - cam_t[2]  (negative = in front)
+    # z_view = z - cam_t[2]  (negative = in front of camera)
     # distance = -z_view
     x_view = original_verts[:, 0] + CAM_T[0]
     y_view = original_verts[:, 1] + CAM_T[1]
@@ -84,7 +83,7 @@ def refine_mesh(mesh_path, image_path):
     sd_min, sd_max = sd_valid.min(), sd_valid.max()
     sampled_depth_norm = (sampled_depth - sd_min) / (sd_max - sd_min + 1e-8)
 
-    # 4. Regression with FORCED minimum scale
+    # 4. Regression with FORCED POSITIVE slope
     mesh_z_valid = z_view[valid_mask]
     A = np.vstack([sampled_depth_norm[valid_mask], np.ones(valid_mask.sum())]).T
     a, b = np.linalg.lstsq(A, mesh_z_valid, rcond=None)[0]
@@ -92,10 +91,15 @@ def refine_mesh(mesh_path, image_path):
     print("\n========== DEBUG: REGRESSION ==========")
     print(f"Raw regression: a = {a:.6f}, b = {b:.6f}")
 
-    # Force minimum scale so depth map actually affects the mesh
-    sign_a = -1.0 if a < 0 else 1.0
-    if abs(a) < MIN_SCALE:
-        a = sign_a * MIN_SCALE
+    # FORCE POSITIVE SLOPE
+    # The regression can come out negative due to occlusions, which inverts
+    # the depth map. We always want positive so:
+    #   high depth (closer) -> less negative z_view (forward)
+    if a < 0:
+        print(f"[FIX] Regression inverted (a={a:.6f}). Forcing positive.")
+        a = MIN_SCALE
+    elif abs(a) < MIN_SCALE:
+        a = MIN_SCALE
         print(f"Forced minimum: a = {a:.6f}")
     else:
         print(f"Kept original: a = {a:.6f}")
@@ -114,17 +118,17 @@ def refine_mesh(mesh_path, image_path):
     refined_verts = original_verts.copy()
     refined_verts[:, 2] = z_view + raw_z_disp + CAM_T[2]
 
-    # 6. Blend front/back with back volume inflation
-    facing_camera = np.clip(-normals[:, 2], 0, 1)  # 1.0=front, 0.0=back
+    # 6. Blend front/back with smooth transition
+    facing_camera = np.clip(-normals[:, 2], 0, 1)  # 1.0 = front, 0.0 = back
     facing_camera = facing_camera ** 1.5  # Smoother transition
 
     final_verts = (original_verts * (1 - facing_camera[:, None]) +
                    refined_verts * facing_camera[:, None])
 
-    # 7. Back volume inflation (push back of body outward)
+    # 7. Back stays as MHR template (no inflation)
+    # Hidden parts should remain generic - we have no data for them.
     back_mask = facing_camera < 0.5
-    final_verts[back_mask, 2] += BACK_INFLATE * (1.0 - facing_camera[back_mask])
-    print(f"Inflated {back_mask.sum()} back vertices by up to {BACK_INFLATE*100:.1f}cm")
+    print(f"Kept {back_mask.sum()} back vertices at MHR template shape (no inflation)")
 
     # 8. Build and smooth
     refined_mesh = trimesh.Trimesh(vertices=final_verts, faces=mesh.faces)
