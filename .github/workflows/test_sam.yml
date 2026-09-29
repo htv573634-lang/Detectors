@@ -43,10 +43,11 @@ jobs:
       run: |
         cd SAM3DBody-cpp
         bash tools/fetch_model.sh shared cpu shared --yes
-        echo "--- Contents of onnx/ ---"
+        echo "--- onnx contents ---"
         ls -lh onnx/ || true
-        echo "--- Contents of root ---"
-        ls -lh ./*.onnx ./*.gguf ./*.lbs ./*.bin 2>/dev/null || true
+
+    - name: Patch C++ Source for Mesh Export
+      run: python patch_cpp.py
 
     - name: Build SAM3DBody-cpp (CPU-Only)
       run: |
@@ -57,6 +58,12 @@ jobs:
 
     - name: Run SAM Pipeline (Headless)
       run: xvfb-run -a python test_sam.py
+
+    - name: Combine Vertices and Faces into OBJ
+      run: python make_obj.py
+
+    - name: List Output Folder
+      run: ls -lh out_sam/ || true
 
     - name: Upload Output Artifacts
       uses: actions/upload-artifact@v4
