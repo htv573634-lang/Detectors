@@ -30,10 +30,11 @@ jobs:
       with:
         python-version: "3.10"
 
-    - name: Install Hugging Face CLI and Trimesh
+    - name: Install Python Packages
       run: |
         pip install huggingface_hub
-        pip install trimesh
+        pip install trimesh numpy
+        pip install open3d
 
     - name: Clone SAM3DBody-cpp
       run: git clone https://github.com/AmmarkoV/SAM3DBody-cpp.git
@@ -65,7 +66,7 @@ jobs:
       run: python make_obj.py
       continue-on-error: true
 
-    - name: Smooth and Subdivide Mesh (HQ)
+    - name: Smooth and Reconstruct Mesh (HQ)
       run: python clean_mesh.py
       continue-on-error: true
 
