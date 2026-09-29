@@ -36,8 +36,6 @@ jobs:
         pip install trimesh numpy scipy open3d
         pip install opencv-python-headless
         pip install Pillow
-        pip install torch --index-url https://download.pytorch.org/whl/cpu
-        pip install transformers
 
     - name: Clone SAM3DBody-cpp
       run: git clone https://github.com/AmmarkoV/SAM3DBody-cpp.git
@@ -66,14 +64,6 @@ jobs:
 
     - name: Combine Posed Vertices with Real Topology
       run: python make_obj.py
-
-    - name: Diagnose Projection Conventions
-      run: python diagnose_projection.py
-      continue-on-error: true
-
-    - name: Refine Mesh with Depth Anything
-      run: python refine_depth.py
-      continue-on-error: true
 
     - name: Smooth and Subdivide Mesh (HQ)
       run: python clean_mesh.py
