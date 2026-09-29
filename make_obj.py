@@ -46,9 +46,8 @@ def load_faces(path):
 def main():
     if not os.path.isfile(VERTICES_FILE):
         print(f"[SKIP] Vertices file not found: {VERTICES_FILE}")
-        print("       The C++ patch has not been applied yet.")
-        print("       Run find_src.py, paste the output, and we will patch the correct file.")
-        return  # <-- graceful exit, no crash
+        print("       C++ patch may not have run. Check the 'Patch' step in the log.")
+        return
 
     if not os.path.isfile(TRI_FILE):
         print(f"[SKIP] Triangle file not found: {TRI_FILE}")
