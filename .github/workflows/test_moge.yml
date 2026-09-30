@@ -1,0 +1,71 @@
+name: Test MoGe-2 (CPU)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  moge:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repo
+      uses: actions/checkout@v4
+
+    - name: Install System Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential cmake git wget unzip \
+          libopencv-dev python3-opencv \
+          libgl1 libglib2.0-0
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+
+    - name: Install PyTorch (CPU)
+      run: |
+        pip install --upgrade pip
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+    - name: Clone MoGe Repository
+      run: git clone https://github.com/microsoft/MoGe.git
+
+    - name: Install MoGe Dependencies
+      run: |
+        cd MoGe
+        pip install -e .
+        # Install extra dependencies for image processing and saving
+        pip install opencv-python-headless pillow numpy trimesh
+
+    - name: Download MoGe-2 Model (ViT-L + Normal Head)
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: |
+        python -c "
+        from huggingface_hub import snapshot_download
+        snapshot_download(
+            repo_id='Ruicheng/moge-2-vitl-normal',
+            local_dir='MoGe/checkpoints/moge-2-vitl-normal',
+            token='${{ secrets.HF_TOKEN }}'
+        )
+        "
+        echo "Model downloaded to MoGe/checkpoints/moge-2-vitl-normal"
+
+    - name: Run MoGe-2 Inference on All Images
+      run: python test_moge.py 2>&1 | tee /tmp/moge_output.log
+
+    - name: Show Log Tail
+      if: always()
+      run: tail -60 /tmp/moge_output.log || true
+
+    - name: Upload MoGe Output Artifacts
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: moge-output-${{ github.run_number }}
+        path: |
+          out_moge/
+          /tmp/moge_output.log
+        if-no-files-found: warn
