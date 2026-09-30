@@ -9,22 +9,36 @@ import open3d as o3d
 INPUT_IMAGE = "inputs2/test-2.png"
 OUTPUT_DIR = "out_moge"
 
-# ── DA SETTINGS ──
-DA_MODEL_ID = "depth-anything/Depth-Anything-V2-Base-hf"
+# ══════════════════════════════════════════════════
+# ── FUSION MODE ──
+# "additive" → 12 MB reference (DA edges only, ±8 mm)
+# "blend"    → full DA surface at α weight
+# ══════════════════════════════════════════════════
+FUSION_MODE = "blend"        # change to "additive" to match the exact 12 MB run
+
+# ── ADDITIVE MODE (12 MB reference) ──
 DA_INTENSITY = 0.50
 MAX_DELTA_METERS = 0.008
+
+# ── BLEND MODE ──
+ALPHA = 0.30
+MAX_BLEND_DELTA = 0.05
+
+# ── DA SETTINGS ──
+DA_MODEL_ID = "depth-anything/Depth-Anything-V2-Base-hf"
 DA_BLUR_SIGMA = 6.0
 CORRELATION_THRESHOLD = 0.30
 
-# ── LINE-REMOVAL SETTINGS ──
-DEPTH_BILATERAL_D = 7          # filter diameter
-DEPTH_BILATERAL_SIGMA_COLOR = 0.02   # ← LOW value preserves features
-DEPTH_BILATERAL_SIGMA_SPACE = 4      # ← only smooths close neighbors (row-to-row)
-DEPTH_GAUSSIAN_SIGMA = 0.8     # gentle Gaussian after bilateral
+# ── LINE-REMOVAL (FIXED: normalizes depth before filtering) ──
+USE_BILATERAL = False        # ← False for exact 12 MB match; True to try line removal
+DEPTH_BILATERAL_D = 7
+DEPTH_BILATERAL_SIGMA_COLOR = 0.05   # value is for [0,1] normalized range
+DEPTH_BILATERAL_SIGMA_SPACE = 4
+DEPTH_GAUSSIAN_SIGMA = 0.8
 
-# ── MESH QUALITY ──
-SUBDIVIDE_PASSES = 2           # was 1 → now 2 (finer surface)
-SMOOTH_ITERS = 8               # was 10 → now 8 (preserve detail on finer mesh)
+# ── MESH QUALITY (12 MB target) ──
+SUBDIVIDE_PASSES = 1         # ← 1 pass → ~350k verts → ~12 MB GLB
+SMOOTH_ITERS = 10            # ← matches the good run
 
 
 def find_name():
@@ -36,6 +50,7 @@ def find_name():
 
 
 def get_da_depth(image_path):
+    print(f"[*] Loading DA model: {DA_MODEL_ID}")
     from transformers import pipeline
     pipe = pipeline(task="depth-estimation", model=DA_MODEL_ID, device="cpu")
     img = Image.open(image_path).convert("RGB")
@@ -64,20 +79,23 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     NAME = find_name()
     print(f"[*] Processing: {NAME}")
+    print(f"[*] Fusion mode: {FUSION_MODE}")
+    print(f"[*] Subdivision passes: {SUBDIVIDE_PASSES}")
+    print(f"[*] Taubin iterations: {SMOOTH_ITERS}")
+    print(f"[*] Bilateral filter: {USE_BILATERAL}")
 
-    # Load MoGe raw grids
+    # ── Load MoGe raw grids ──
     points = np.load(os.path.join(OUTPUT_DIR, f"{NAME}_points_raw.npy"))
     mask   = np.load(os.path.join(OUTPUT_DIR, f"{NAME}_mask_raw.npy"))
     moge_depth = np.load(os.path.join(OUTPUT_DIR, f"{NAME}_depth_raw.npy"))
     H_m, W_m = mask.shape
-    print(f"[*] MoGe grid: {W_m}x{H_m}")
+    print(f"\n[*] MoGe grid: {W_m}x{H_m}")
 
     valid = (mask > 0.5) & (np.abs(moge_depth) > 1e-6)
     print(f"    Valid pixels: {int(valid.sum())}")
     print(f"    MoGe depth range: {moge_depth[valid].min():.3f} - {moge_depth[valid].max():.3f}")
 
-    # ── DA inference ──
-    print(f"[*] Loading DA model: {DA_MODEL_ID}")
+    # ── Run DA ──
     da_depth = get_da_depth(INPUT_IMAGE)
     da_resized = cv2.resize(da_depth, (W_m, H_m), interpolation=cv2.INTER_LINEAR)
     da_norm = (da_resized - da_resized.min()) / (da_resized.max() - da_resized.min() + 1e-8)
@@ -86,14 +104,16 @@ def main():
     X = da_norm[valid]
     Y = moge_depth[valid]
     corr = np.corrcoef(X, Y)[0, 1]
-    print(f"\n===== CORRELATION ===== ")
+    print(f"\n===== CORRELATION =====")
     print(f"    corr(DA, MoGe_depth) = {corr:.4f}")
 
-    delta_z = np.zeros_like(moge_depth)
+    fused_depth = moge_depth.copy()
 
     if abs(corr) >= CORRELATION_THRESHOLD:
+        # Align DA to MoGe metric scale
         A = np.vstack([X, np.ones_like(X)]).T
         a, b = np.linalg.lstsq(A, Y, rcond=None)[0]
+
         if a > 0:
             print(f"    [FIX] DA inverted. Flipping.")
             da_norm = 1.0 - da_norm
@@ -102,50 +122,79 @@ def main():
             a, b = np.linalg.lstsq(A, Y, rcond=None)[0]
 
         da_metric = a * da_norm + b
-        da_base = cv2.GaussianBlur(da_metric, (0, 0), DA_BLUR_SIGMA)
-        da_edges = da_metric - da_base
+        print(f"    Regression: Z ≈ {a:.4f} * DA + {b:.4f}")
+        print(f"    DA metric range: {da_metric[valid].min():.3f} - {da_metric[valid].max():.3f}")
 
-        raw_delta = DA_INTENSITY * da_edges
-        delta_z = np.clip(raw_delta, -MAX_DELTA_METERS, MAX_DELTA_METERS)
-        print(f"    Delta range = {delta_z[valid].min():.5f} to {delta_z[valid].max():.5f}")
+        # ── FUSION ──
+        if FUSION_MODE == "additive":
+            da_base = cv2.GaussianBlur(da_metric, (0, 0), DA_BLUR_SIGMA)
+            da_edges = da_metric - da_base
+            raw_delta = DA_INTENSITY * da_edges
+            delta_z = np.clip(raw_delta, -MAX_DELTA_METERS, MAX_DELTA_METERS)
+            fused_depth = moge_depth + delta_z
+            print(f"    Additive: intensity={DA_INTENSITY}, clamp=±{MAX_DELTA_METERS}")
+            print(f"    Delta range: {delta_z[valid].min():.5f} to {delta_z[valid].max():.5f}")
+
+        elif FUSION_MODE == "blend":
+            delta = da_metric - moge_depth
+            delta_clamped = np.clip(delta, -MAX_BLEND_DELTA, MAX_BLEND_DELTA)
+            clamp_frac = (np.abs(delta - delta_clamped) > 1e-6).mean()
+            if clamp_frac > 0.05:
+                print(f"    [WARN] {clamp_frac*100:.1f}% of pixels hit the clamp.")
+            fused_depth = moge_depth + ALPHA * delta_clamped
+            print(f"    Blend: α={ALPHA}, clamp=±{MAX_BLEND_DELTA}")
+            print(f"    Delta range: {delta[valid].min():.4f} to {delta[valid].max():.4f}")
+            print(f"    Clamped: {delta_clamped[valid].min():.4f} to {delta_clamped[valid].max():.4f}")
     else:
-        print(f"    [SKIP] Correlation too low")
+        print(f"    [SKIP] Correlation too low.")
 
-    # ── Apply DA delta ──
-    fused_depth = moge_depth + delta_z
+    fused_depth[~valid] = moge_depth[~valid]
+    print(f"    Fused depth range: {fused_depth[valid].min():.3f} - {fused_depth[valid].max():.3f}")
+
+    # ══════════════════════════════════════════════
+    # ── LINE-REMOVAL (FIXED: normalized, NaN-safe) ──
+    # ══════════════════════════════════════════════
+    if USE_BILATERAL:
+        print(f"\n[*] Bilateral filter (normalized)...")
+        z_channel = fused_depth.astype(np.float32)
+        print(f"    Before: [{z_channel[valid].min():.4f}, {z_channel[valid].max():.4f}]")
+
+        z_min = float(z_channel[valid].min())
+        z_max = float(z_channel[valid].max())
+        z_norm = (z_channel - z_min) / (z_max - z_min + 1e-8)
+
+        z_smooth_norm = cv2.bilateralFilter(
+            z_norm,
+            d=DEPTH_BILATERAL_D,
+            sigmaColor=DEPTH_BILATERAL_SIGMA_COLOR,
+            sigmaSpace=DEPTH_BILATERAL_SIGMA_SPACE,
+        )
+        z_smooth_norm = cv2.GaussianBlur(z_smooth_norm, (0, 0), DEPTH_GAUSSIAN_SIGMA)
+
+        z_smooth = z_smooth_norm * (z_max - z_min) + z_min
+        z_smooth[~valid] = z_channel[~valid]
+
+        if np.isnan(z_smooth).any():
+            print(f"    [ERROR] NaN detected — using raw depth")
+            z_smooth = z_channel.copy()
+
+        fused_depth = z_smooth
+        print(f"    After:  [{fused_depth[valid].min():.4f}, {fused_depth[valid].max():.4f}]")
+    else:
+        print(f"\n[*] Bilateral filter: DISABLED (using raw fused depth)")
+
+    # ── Build point grid ──
     fused_points = points.copy()
     fused_points[:, :, 2] = fused_depth
 
-    # ══════════════════════════════════════════════
-    # ── LINE-REMOVAL STEP: SMOOTH THE DEPTH GRID ──
-    # Bilateral filter removes row-to-row jumps.
-    # Applied to the Z-channel of the point grid.
-    # ══════════════════════════════════════════════
-    print("\n[*] Applying bilateral filter to remove grid terracing...")
-
-    # First: bilateral on the depth (row-to-row smoothing, feature-preserving)
-    z_channel = fused_points[:, :, 2].astype(np.float32)
-    z_smooth = cv2.bilateralFilter(
-        z_channel,
-        d=DEPTH_BILATERAL_D,
-        sigmaColor=DEPTH_BILATERAL_SIGMA_COLOR,
-        sigmaSpace=DEPTH_BILATERAL_SIGMA_SPACE,
-    )
-
-    # Second: gentle Gaussian to blend the seams
-    z_smooth = cv2.GaussianBlur(z_smooth, (0, 0), DEPTH_GAUSSIAN_SIGMA)
-
-    # Preserve mask: don't smooth over invalid pixels
-    z_smooth[~valid] = z_channel[~valid]
-
-    fused_points[:, :, 2] = z_smooth
-    print(f"    Z-channel: raw range [{z_channel[valid].min():.4f}, {z_channel[valid].max():.4f}]")
-    print(f"    Z-channel: smoothed range [{z_smooth[valid].min():.4f}, {z_smooth[valid].max():.4f}]")
-
     # ── Triangulate ──
-    print("\n[*] Triangulating...")
+    print(f"\n[*] Triangulating...")
     verts, faces = triangulate(fused_points, mask)
     print(f"    Raw: {len(verts)} verts, {len(faces)} faces")
+
+    if np.isnan(verts).any():
+        print(f"    [ERROR] NaN in vertices — aborting.")
+        return
 
     mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
 
@@ -158,14 +207,12 @@ def main():
     o3d_mesh.remove_duplicated_triangles()
     o3d_mesh.remove_unreferenced_vertices()
 
-    # ── Subdivision (2 passes for finer surface) ──
     for i in range(SUBDIVIDE_PASSES):
-        print(f"[*] Subdivision pass {i+1}/{SUBDIVIDE_PASSES}...")
+        print(f"[*] Subdivision {i+1}/{SUBDIVIDE_PASSES}...")
         o3d_mesh = o3d_mesh.subdivide_midpoint(number_of_iterations=1)
         print(f"    {len(o3d_mesh.vertices)} verts, {len(o3d_mesh.triangles)} faces")
 
-    # ── Taubin smoothing ──
-    print(f"[*] Taubin smoothing ({SMOOTH_ITERS} iterations)...")
+    print(f"[*] Taubin smoothing ({SMOOTH_ITERS} iters)...")
     o3d_mesh = o3d_mesh.filter_smooth_taubin(number_of_iterations=SMOOTH_ITERS)
     o3d_mesh.compute_vertex_normals()
 
@@ -179,8 +226,7 @@ def main():
     glb_path = os.path.join(OUTPUT_DIR, f"{NAME}_mesh_fused.glb")
     final.export(obj_path)
     final.export(glb_path)
-    print(f"\n[OK] {obj_path}")
-    print(f"[OK] {glb_path}")
+    print(f"\n[OK] {glb_path}")
     print(f"    GLB size: {os.path.getsize(glb_path)/1024/1024:.2f} MB")
 
 
