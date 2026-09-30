@@ -1,0 +1,77 @@
+name: Test PEAR (CPU)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  pear:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repo
+      uses: actions/checkout@v4
+
+    - name: Install System Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential cmake git wget unzip \
+          libopencv-dev python3-opencv \
+          libgl1 libglib2.0-0 \
+          libgl1-mesa-dev libglu1-mesa-dev libglx-dev \
+          libglew-dev \
+          libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+          xvfb
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+
+    - name: Install PyTorch (CPU)
+      run: |
+        pip install --upgrade pip
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+    - name: Install Python Packages
+      run: |
+        pip install huggingface_hub
+        pip install trimesh numpy scipy open3d
+        pip install opencv-python-headless Pillow
+        pip install chumpy
+        # PEAR requires pytorch3d, which we attempt to build for CPU.
+        pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-isolation || true
+
+    - name: Clone PEAR
+      run: |
+        git clone --recursive https://github.com/Pixel-Talk/PEAR.git
+        ls -R PEAR | head -60
+
+    - name: Fetch SMPL-X Template from Release
+      run: |
+        mkdir -p PEAR/assets/SMPLX
+        BASE="https://github.com/htv573634-lang/Detectors/releases/download/Data"
+        
+        echo "[*] Downloading SMPLX_FEMALE.pkl (248MB)..."
+        wget -q --show-progress -O PEAR/assets/SMPLX/SMPLX_FEMALE.pkl "$BASE/SMPLX_FEMALE.pkl"
+        
+        echo "[*] Verifying download..."
+        ls -lh PEAR/assets/SMPLX/
+
+    - name: Run PEAR Inference
+      run: python -u test_pear.py 2>&1 | tee /tmp/pear_log.txt
+      continue-on-error: true
+
+    - name: Show Log Tail
+      if: always()
+      run: tail -80 /tmp/pear_log.txt || true
+
+    - name: Upload Artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: pear-output
+        path: |
+          out_pear/
+          /tmp/pear_log.txt
+        if-no-files-found: warn
