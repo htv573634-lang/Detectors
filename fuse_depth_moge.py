@@ -16,12 +16,11 @@ OUTPUT_OBJ = os.path.join(OUTPUT_DIR, "test-2_mesh_fused.obj")
 OUTPUT_GLB = os.path.join(OUTPUT_DIR, "test-2_mesh_fused.glb")
 OUTPUT_FUSED_DEPTH = os.path.join(OUTPUT_DIR, "test-2_depth_fused.png")
 
-BLEND_MOGE_WEIGHT = 0.6
-DA_MODEL_ID = "depth-anything/Depth-Anything-V2-Small-hf"
-
-# Poisson reconstruction params
-POISSON_DEPTH = 9
-DENSITY_QUANTILE = 0.05
+# --- INTENSITY CONTROLS ---
+BLEND_MOGE_WEIGHT = 0.45     # Lower = more DA detail, less MoGe smoothness
+DA_MODEL_ID = "depth-anything/Depth-Anything-V2-Base-hf"   # upgraded from Small
+POISSON_DEPTH = 11           # higher = finer mesh (was 9)
+DENSITY_QUANTILE = 0.03      # lower trim (was 0.05)
 
 def find_latest(pattern):
     files = glob.glob(pattern)
@@ -43,7 +42,7 @@ def load_moge_ply(ply_path):
     return np.asarray(pcd.vertices)
 
 def get_da_depth(image_path):
-    print("[*] Loading Depth Anything V2 Small...")
+    print(f"[*] Loading Depth Anything V2 Base ({DA_MODEL_ID})...")
     from transformers import pipeline
     pipe = pipeline(task="depth-estimation", model=DA_MODEL_ID, device="cpu")
     img = Image.open(image_path).convert("RGB")
@@ -53,7 +52,6 @@ def get_da_depth(image_path):
     return depth
 
 def fuse_depths(img_path, ply_path):
-    """Fuse MoGe metric depth with DA relative depth. Returns (H,W,3) point grid + mask."""
     img_bgr = cv2.imread(img_path)
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     H, W = img_rgb.shape[:2]
@@ -104,7 +102,6 @@ def fuse_depths(img_path, ply_path):
     fused_points = points_grid.copy()
     fused_points[:, :, 2] = fused_depth
 
-    # Vis
     vis = fused_depth.copy()
     vis[~valid_mask] = vis[valid_mask].min()
     vis_norm = (vis - vis.min()) / (vis.max() - vis.min() + 1e-8)
@@ -114,21 +111,19 @@ def fuse_depths(img_path, ply_path):
     return fused_points, valid_mask
 
 def poisson_mesh_from_points(pts, output_obj):
-    """Reconstruct mesh from point cloud using Open3D Poisson."""
     print(f"[*] Poisson reconstruction from {len(pts)} points...")
-
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
 
-    if len(pcd.points) > 100000:
-        print(f"    Downsampling to 100k...")
-        pcd = pcd.voxel_down_sample(voxel_size=0.005)
+    if len(pcd.points) > 200000:
+        print(f"    Downsampling...")
+        pcd = pcd.voxel_down_sample(voxel_size=0.003)
 
     print("[*] Estimating normals...")
     pcd.estimate_normals(
-        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.02, max_nn=30)
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.015, max_nn=40)
     )
-    pcd.orient_normals_consistent_tangent_plane(30)
+    pcd.orient_normals_consistent_tangent_plane(40)
 
     print(f"[*] Poisson (depth={POISSON_DEPTH})...")
     mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
@@ -155,17 +150,11 @@ def poisson_mesh_from_points(pts, output_obj):
 
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-
     img_path = INPUT_IMAGE if os.path.isfile(INPUT_IMAGE) else find_input_image()
-    print(f"[*] Image: {img_path}")
-
     ply_path = MOGE_PLY if os.path.isfile(MOGE_PLY) else find_latest("out_moge/*_points.ply")
-    print(f"[*] MoGe PLY: {ply_path}")
 
-    # Fuse
     fused_points, valid_mask = fuse_depths(img_path, ply_path)
 
-    # Save fused PLY
     flat = fused_points.reshape(-1, 3)
     valid_flat = valid_mask.reshape(-1)
     flat_valid = flat[valid_flat]
@@ -175,13 +164,8 @@ def main():
     pcd.export(OUTPUT_PLY)
     print(f"[OK] PLY: {OUTPUT_PLY}")
 
-    pcd_all = trimesh.PointCloud(flat)
-    pcd_all.export(OUTPUT_PLY.replace(".ply", "_all.ply"))
-
-    # Mesh from fused points
     print("\n[*] Converting fused PLY to OBJ mesh...")
     poisson_mesh_from_points(flat_valid, OUTPUT_OBJ)
-
     print("\n[SUCCESS] Done.")
 
 if __name__ == "__main__":
