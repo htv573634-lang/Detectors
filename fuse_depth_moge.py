@@ -1,5 +1,4 @@
 import os
-import glob
 import numpy as np
 import torch
 import cv2
@@ -9,16 +8,13 @@ import open3d as o3d
 
 INPUT_IMAGE = "inputs2/test-2.png"
 OUTPUT_DIR = "out_moge"
+NAME = "test-2"
 
-# Fusion controls
+# Intensity controls — used ONLY if correlation proves meaningful
 DA_MODEL_ID = "depth-anything/Depth-Anything-V2-Base-hf"
-DA_INTENSITY = 3.0
+DA_INTENSITY = 2.0
 DA_BLUR_SIGMA = 4.0
-
-def find_latest(pattern):
-    files = glob.glob(pattern)
-    files.sort(key=os.path.getmtime, reverse=True)
-    return files[0] if files else None
+CORRELATION_THRESHOLD = 0.30   # below this, DA is ignored entirely
 
 def get_da_depth(image_path):
     from transformers import pipeline
@@ -27,22 +23,18 @@ def get_da_depth(image_path):
     out = pipe(img)
     return np.array(out["depth"], dtype=np.float32)
 
-def build_mesh_from_grid(points, mask):
-    """Triangulate the (H,W,3) grid directly — no Poisson needed."""
+def triangulate(points, mask):
+    """Build mesh from MoGe's native grid without resampling."""
     H, W = mask.shape
+    verts = []
+    idx = -np.ones((H, W), dtype=np.int32)
+    v = mask > 0.5
+    verts = points[v]
+    idx[v] = np.arange(len(verts))
     faces = []
-    # Map (i,j) -> vertex index
-    idx_map = -np.ones((H, W), dtype=np.int32)
-    valid = mask > 0.5
-    verts = points[valid]
-    idx_map[valid] = np.arange(len(verts))
-
     for i in range(H - 1):
         for j in range(W - 1):
-            a = idx_map[i, j]
-            b = idx_map[i + 1, j]
-            c = idx_map[i, j + 1]
-            d = idx_map[i + 1, j + 1]
+            a = idx[i, j]; b = idx[i+1, j]; c = idx[i, j+1]; d = idx[i+1, j+1]
             if a >= 0 and b >= 0 and c >= 0:
                 faces.append([a, b, c])
             if b >= 0 and d >= 0 and c >= 0:
@@ -51,21 +43,27 @@ def build_mesh_from_grid(points, mask):
 
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    name = "test-2"
 
-    # ── Load full MoGe grid ──
-    points = np.load(os.path.join(OUTPUT_DIR, f"{name}_points_full.npy"))  # (H,W,3)
-    mask   = np.load(os.path.join(OUTPUT_DIR, f"{name}_mask_full.npy"))    # (H,W)
+    # ── Load MoGe's native output ──
+    points = np.load(os.path.join(OUTPUT_DIR, f"{NAME}_points_raw.npy"))
+    mask = np.load(os.path.join(OUTPUT_DIR, f"{NAME}_mask_raw.npy"))
+    moge_depth = np.load(os.path.join(OUTPUT_DIR, f"{NAME}_depth_raw.npy"))
+
     H_m, W_m = mask.shape
-    print(f"[*] MoGe grid: {W_m}x{H_m}")
-
-    moge_depth = points[:, :, 2]  # Z-component = metric depth
+    print(f"[*] MoGe grid: H_m={H_m}, W_m={W_m}")
     print(f"    MoGe depth range: {moge_depth[mask > 0.5].min():.3f} - {moge_depth[mask > 0.5].max():.3f}")
 
-    # ── Run DA at full MoGe resolution ──
+    # ── Load DA at native image resolution ──
     print("[*] Running Depth Anything V2 Base...")
-    da_depth = get_da_depth(INPUT_IMAGE)  # (H_img, W_img)
+    da_depth = get_da_depth(INPUT_IMAGE)
+    print(f"    DA shape: {da_depth.shape}")
+
+    # ── Resize DA to MoGe's grid (H_m, W_m) with correct cv2 order ──
+    # cv2.resize takes (width, height) — so pass (W_m, H_m) to get shape (H_m, W_m)
     da_resized = cv2.resize(da_depth, (W_m, H_m), interpolation=cv2.INTER_LINEAR)
+    print(f"    DA resized to: {da_resized.shape}")
+
+    # ── Normalize DA to [0, 1] ──
     da_norm = (da_resized - da_resized.min()) / (da_resized.max() - da_resized.min() + 1e-8)
 
     # ── Regression on valid pixels only ──
@@ -75,60 +73,62 @@ def main():
 
     X = da_norm[valid]
     Y = moge_depth[valid]
-    A = np.vstack([X, np.ones_like(X)]).T
-    a, b = np.linalg.lstsq(A, Y, rcond=None)[0]
-    print(f"    Regression: Z ≈ {a:.4f} * da_norm + {b:.4f}   (expected |a| ~ 0.5-2.0)")
 
-    # Auto-flip if regression slope is positive (means DA is inverted)
-    if a > 0:
-        print(f"    [FIX] DA inverted (a>0). Flipping.")
-        da_norm = 1.0 - da_norm
-        X = da_norm[valid]
+    corr = np.corrcoef(X, Y)[0, 1]
+    print(f"    Correlation(DA, MoGe_depth) = {corr:.4f}")
+
+    # ── Decision: use DA only if correlation is meaningful ──
+    if abs(corr) < CORRELATION_THRESHOLD:
+        print(f"    [!] Correlation below threshold ({CORRELATION_THRESHOLD}).")
+        print(f"    [!] DA cannot refine MoGe depth for this image. Using MoGe alone.")
+        fused_depth = moge_depth.copy()
+    else:
+        # Fit linear regression
         A = np.vstack([X, np.ones_like(X)]).T
         a, b = np.linalg.lstsq(A, Y, rcond=None)[0]
-        print(f"    Corrected: Z ≈ {a:.4f} * da_norm + {b:.4f}")
+        print(f"    Regression: Z ≈ {a:.4f} * DA + {b:.4f}")
 
-    da_metric = a * da_norm + b
+        # Auto-flip if positive (means DA is inverted relative to MoGe)
+        if a > 0:
+            print(f"    [FIX] DA inverted. Flipping.")
+            da_norm = 1.0 - da_norm
+            X = da_norm[valid]
+            A = np.vstack([X, np.ones_like(X)]).T
+            a, b = np.linalg.lstsq(A, Y, rcond=None)[0]
+            print(f"    Corrected: Z ≈ {a:.4f} * DA + {b:.4f}")
 
-    # ── High-frequency edge transfer ──
-    da_base = cv2.GaussianBlur(da_metric, (0, 0), DA_BLUR_SIGMA)
-    da_edges = da_metric - da_base
-    print(f"    DA edges: {da_edges[valid].min():.5f} to {da_edges[valid].max():.5f}")
+        da_metric = a * da_norm + b
+        da_base = cv2.GaussianBlur(da_metric, (0, 0), DA_BLUR_SIGMA)
+        da_edges = da_metric - da_base
+        print(f"    DA edges std: {da_edges[valid].std():.5f}")
 
-    fused_z = moge_depth + DA_INTENSITY * da_edges
-    print(f"    Fused depth range: {fused_z[valid].min():.3f} - {fused_z[valid].max():.3f}")
+        # Only apply if edges are meaningful
+        if da_edges[valid].std() < 1e-4:
+            print(f"    [!] DA edges are negligible. Using MoGe alone.")
+            fused_depth = moge_depth.copy()
+        else:
+            print(f"    Applying DA edges (intensity={DA_INTENSITY})...")
+            fused_depth = moge_depth + DA_INTENSITY * da_edges
+            fused_depth[~valid] = moge_depth[~valid]
 
-    # ── Build fused point grid ──
+    # ── Build mesh from MoGe's native grid ──
+    print("[*] Triangulating MoGe grid...")
     fused_points = points.copy()
-    fused_points[:, :, 2] = fused_z
+    # MoGe returns points as (H_m, W_m, 3); we replace Z with fused_depth
+    fused_points[:, :, 2] = fused_depth
 
-    # ── Save fused grid ──
-    np.save(os.path.join(OUTPUT_DIR, f"{name}_points_fused_full.npy"), fused_points)
-
-    # ── Save vis ──
-    vis = fused_z.copy()
-    vis[~valid] = vis[valid].min()
-    vn = (vis - vis.min()) / (vis.max() - vis.min() + 1e-8)
-    cv2.imwrite(os.path.join(OUTPUT_DIR, f"{name}_depth_fused.png"), (vn * 255).astype(np.uint8))
-
-    edge_vis = ((da_edges - da_edges.min()) / (da_edges.max() - da_edges.min() + 1e-8) * 255).astype(np.uint8)
-    edge_vis[~valid] = 0
-    cv2.imwrite(os.path.join(OUTPUT_DIR, f"{name}_da_edges.png"), edge_vis)
-
-    # ── Direct triangulation (no Poisson needed) ──
-    print("[*] Triangulating fused grid...")
-    verts, faces = build_mesh_from_grid(fused_points, mask)
+    verts, faces = triangulate(fused_points, mask)
     print(f"    {len(verts)} verts, {len(faces)} faces")
 
     mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
 
-    # ── Light smoothing to remove grid artifacts ──
+    # Light smoothing
     o3d_mesh = o3d.geometry.TriangleMesh(
         o3d.utility.Vector3dVector(mesh.vertices),
         o3d.utility.Vector3iVector(mesh.faces),
     )
     o3d_mesh.remove_degenerate_triangles()
-    o3d_mesh = o3d_mesh.filter_smooth_taubin(number_of_iterations=3)
+    o3d_mesh.remove_duplicated_vertices()
     o3d_mesh.compute_vertex_normals()
 
     final = trimesh.Trimesh(
@@ -137,8 +137,8 @@ def main():
         process=False,
     )
 
-    obj_path = os.path.join(OUTPUT_DIR, f"{name}_mesh_fused.obj")
-    glb_path = os.path.join(OUTPUT_DIR, f"{name}_mesh_fused.glb")
+    obj_path = os.path.join(OUTPUT_DIR, f"{NAME}_mesh_fused.obj")
+    glb_path = os.path.join(OUTPUT_DIR, f"{NAME}_mesh_fused.glb")
     final.export(obj_path)
     final.export(glb_path)
     print(f"[OK] {obj_path}")
