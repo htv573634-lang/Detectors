@@ -15,6 +15,13 @@ jobs:
           fetch-depth: 0
           ref: main
 
+      # ── CLEAN: remove stale outputs from previous runs ──
+      - name: Clean previous HMR2.0 outputs
+        run: |
+          rm -rf out_hmr2/
+          mkdir -p out_hmr2/
+          echo "[OK] out_hmr2/ cleared"
+
       # CACHES
       - name: Cache pip wheels
         uses: actions/cache@v4
@@ -76,13 +83,11 @@ jobs:
           pip install --upgrade pip
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
-      # ── THE FIX ─────────────────────────────────────────────
       - name: Install build deps (pinned setuptools<81)
         run: |
           pip install --upgrade pip
           pip install "setuptools<81" wheel cython
           python -c "import pkg_resources; print('[OK] pkg_resources available')"
-      # ────────────────────────────────────────────────────────
 
       - name: Install Detectron2 (CPU, no isolation)
         run: |
@@ -151,6 +156,12 @@ jobs:
         if: always()
         run: tail -80 /tmp/test_output.log 2>/dev/null || echo "No log"
 
+      - name: List current-run outputs
+        if: always()
+        run: |
+          echo "=== Files produced by this run ==="
+          ls -lh out_hmr2/ || echo "out_hmr2/ empty"
+
       - name: Sync + commit
         if: success()
         run: |
@@ -166,10 +177,12 @@ jobs:
           branch: main
           push_options: '--force-with-lease'
 
+      # ── ARTIFACT: only current-run files ──
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: hmr2-results
+          name: hmr2-results-${{ github.run_number }}
           path: |
             out_hmr2/
             /tmp/test_output.log
+          if-no-files-found: warn
