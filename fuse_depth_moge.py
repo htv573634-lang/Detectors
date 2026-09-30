@@ -1,4 +1,5 @@
 import os
+import glob
 import numpy as np
 import torch
 import cv2
@@ -10,11 +11,13 @@ INPUT_IMAGE = "inputs2/test-2.png"
 OUTPUT_DIR = "out_moge"
 NAME = "test-2"
 
-# Intensity controls — used ONLY if correlation proves meaningful
 DA_MODEL_ID = "depth-anything/Depth-Anything-V2-Base-hf"
-DA_INTENSITY = 2.0
-DA_BLUR_SIGMA = 4.0
-CORRELATION_THRESHOLD = 0.30   # below this, DA is ignored entirely
+
+# ── SAFE CONTROLS ──
+DA_INTENSITY = 0.5           # Keep low: 0.3 = subtle, 1.0 = strong
+MAX_DELTA_METERS = 0.008     # HARD CAP: ±8 mm per pixel. Never exceed.
+DA_BLUR_SIGMA = 6.0
+CORRELATION_THRESHOLD = 0.30
 
 def get_da_depth(image_path):
     from transformers import pipeline
@@ -24,9 +27,7 @@ def get_da_depth(image_path):
     return np.array(out["depth"], dtype=np.float32)
 
 def triangulate(points, mask):
-    """Build mesh from MoGe's native grid without resampling."""
     H, W = mask.shape
-    verts = []
     idx = -np.ones((H, W), dtype=np.int32)
     v = mask > 0.5
     verts = points[v]
@@ -44,85 +45,66 @@ def triangulate(points, mask):
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # ── Load MoGe's native output ──
+    # ── Load MoGe's native output (no reshaping) ──
     points = np.load(os.path.join(OUTPUT_DIR, f"{NAME}_points_raw.npy"))
     mask = np.load(os.path.join(OUTPUT_DIR, f"{NAME}_mask_raw.npy"))
     moge_depth = np.load(os.path.join(OUTPUT_DIR, f"{NAME}_depth_raw.npy"))
-
     H_m, W_m = mask.shape
-    print(f"[*] MoGe grid: H_m={H_m}, W_m={W_m}")
+    print(f"[*] MoGe grid: {W_m}x{H_m}")
     print(f"    MoGe depth range: {moge_depth[mask > 0.5].min():.3f} - {moge_depth[mask > 0.5].max():.3f}")
 
-    # ── Load DA at native image resolution ──
+    # ── DA inference ──
     print("[*] Running Depth Anything V2 Base...")
     da_depth = get_da_depth(INPUT_IMAGE)
-    print(f"    DA shape: {da_depth.shape}")
-
-    # ── Resize DA to MoGe's grid (H_m, W_m) with correct cv2 order ──
-    # cv2.resize takes (width, height) — so pass (W_m, H_m) to get shape (H_m, W_m)
     da_resized = cv2.resize(da_depth, (W_m, H_m), interpolation=cv2.INTER_LINEAR)
-    print(f"    DA resized to: {da_resized.shape}")
-
-    # ── Normalize DA to [0, 1] ──
     da_norm = (da_resized - da_resized.min()) / (da_resized.max() - da_resized.min() + 1e-8)
 
-    # ── Regression on valid pixels only ──
+    # ── Regression on valid pixels ──
     valid = (mask > 0.5) & (np.abs(moge_depth) > 1e-6)
-    n_valid = int(valid.sum())
-    print(f"    Valid pixels: {n_valid} / {H_m * W_m}")
-
     X = da_norm[valid]
     Y = moge_depth[valid]
-
     corr = np.corrcoef(X, Y)[0, 1]
-    print(f"    Correlation(DA, MoGe_depth) = {corr:.4f}")
+    print(f"    Correlation = {corr:.4f}")
 
-    # ── Decision: use DA only if correlation is meaningful ──
-    if abs(corr) < CORRELATION_THRESHOLD:
-        print(f"    [!] Correlation below threshold ({CORRELATION_THRESHOLD}).")
-        print(f"    [!] DA cannot refine MoGe depth for this image. Using MoGe alone.")
-        fused_depth = moge_depth.copy()
-    else:
-        # Fit linear regression
+    delta_z = np.zeros_like(moge_depth)
+
+    if abs(corr) >= CORRELATION_THRESHOLD:
         A = np.vstack([X, np.ones_like(X)]).T
         a, b = np.linalg.lstsq(A, Y, rcond=None)[0]
-        print(f"    Regression: Z ≈ {a:.4f} * DA + {b:.4f}")
-
-        # Auto-flip if positive (means DA is inverted relative to MoGe)
         if a > 0:
-            print(f"    [FIX] DA inverted. Flipping.")
             da_norm = 1.0 - da_norm
             X = da_norm[valid]
             A = np.vstack([X, np.ones_like(X)]).T
             a, b = np.linalg.lstsq(A, Y, rcond=None)[0]
-            print(f"    Corrected: Z ≈ {a:.4f} * DA + {b:.4f}")
-
+        print(f"    Regression: Z ≈ {a:.4f} * DA + {b:.4f}")
         da_metric = a * da_norm + b
         da_base = cv2.GaussianBlur(da_metric, (0, 0), DA_BLUR_SIGMA)
         da_edges = da_metric - da_base
-        print(f"    DA edges std: {da_edges[valid].std():.5f}")
 
-        # Only apply if edges are meaningful
-        if da_edges[valid].std() < 1e-4:
-            print(f"    [!] DA edges are negligible. Using MoGe alone.")
-            fused_depth = moge_depth.copy()
-        else:
-            print(f"    Applying DA edges (intensity={DA_INTENSITY})...")
-            fused_depth = moge_depth + DA_INTENSITY * da_edges
-            fused_depth[~valid] = moge_depth[~valid]
+        # ── CRITICAL: hard clamp before multiplying ──
+        raw_delta = DA_INTENSITY * da_edges
+        delta_z = np.clip(raw_delta, -MAX_DELTA_METERS, MAX_DELTA_METERS)
+        print(f"    Raw delta range: {raw_delta[valid].min():.4f} - {raw_delta[valid].max():.4f}")
+        print(f"    Clamped to ±{MAX_DELTA_METERS} m")
+    else:
+        print(f"    [!] Correlation too low. Skipping DA. MoGe alone.")
 
-    # ── Build mesh from MoGe's native grid ──
-    print("[*] Triangulating MoGe grid...")
+    # ── Apply delta as ADDITION, not replacement ──
     fused_points = points.copy()
-    # MoGe returns points as (H_m, W_m, 3); we replace Z with fused_depth
-    fused_points[:, :, 2] = fused_depth
+    fused_points[:, :, 2] += delta_z  # ADD, not REPLACE
+    # Also apply same delta to the depth map for consistency in triangulation
+    fused_depth_map = moge_depth + delta_z
 
+    print(f"    Fused depth range: {fused_depth_map[valid].min():.3f} - {fused_depth_map[valid].max():.3f}")
+
+    # ── Triangulate MoGe grid ──
+    print("[*] Triangulating...")
     verts, faces = triangulate(fused_points, mask)
     print(f"    {len(verts)} verts, {len(faces)} faces")
 
     mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
 
-    # Light smoothing
+    # ── Light cleanup only ──
     o3d_mesh = o3d.geometry.TriangleMesh(
         o3d.utility.Vector3dVector(mesh.vertices),
         o3d.utility.Vector3iVector(mesh.faces),
