@@ -33,34 +33,28 @@ jobs:
         pip install --upgrade pip setuptools wheel
         pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
-    - name: Install Python Packages (Core)
-      run: |
-        pip install huggingface_hub
-        pip install trimesh numpy scipy open3d
-        pip install opencv-python-headless Pillow
-        pip install chumpy --no-build-isolation
-        pip install ultralytics
-        pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-isolation || true
-
     - name: Clone PEAR
       run: |
         git clone --recursive https://github.com/Pixel-Talk/PEAR.git
         cd PEAR
-        # Download YOLO model used by PEAR
         mkdir -p model_zoo
         wget -q -O model_zoo/yolov8x.pt https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8x.pt
-        # Verify config file exists
-        ls configs/
+
+    - name: Install PEAR Requirements (Fixes missing 'timm')
+      run: |
+        cd PEAR
+        pip install -r requirements.txt
+        # Install pytorch3d and chumpy with the correct flag for CPU-only environments
+        pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-isolation || true
+        pip install chumpy --no-build-isolation || true
+        # Install our additional dependencies for the inference script
+        pip install ultralytics
 
     - name: Fetch SMPL-X Template from Release
       run: |
         mkdir -p PEAR/assets/SMPLX
         BASE="https://github.com/htv573634-lang/Detectors/releases/download/Data"
-        
-        echo "[*] Downloading SMPLX_FEMALE.pkl (248MB)..."
         wget -q --show-progress -O PEAR/assets/SMPLX/SMPLX_FEMALE.pkl "$BASE/SMPLX_FEMALE.pkl"
-        
-        echo "[*] Verifying download..."
         ls -lh PEAR/assets/SMPLX/
 
     - name: Run PEAR Inference
@@ -69,7 +63,7 @@ jobs:
 
     - name: Show Log Tail
       if: always()
-      run: tail -80 /tmp/pear_log.txt || true
+      run: tail -100 /tmp/pear_log.txt || true
 
     - name: Upload Artifacts
       if: always()
