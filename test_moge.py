@@ -14,11 +14,10 @@ OUTPUT_DIR = "out_moge"
 MODEL_DIR = "MoGe/checkpoints/moge-2-vitl-normal"
 IMAGE_EXTS = ("jpg", "jpeg", "jpge", "png", "bmp", "webp")
 
-# ── Resolution level ──
-# 5  = 50k points
-# 7  = 200k points
-# 9  = 800k points (highest detail)
+# ── MAX RESOLUTION ──
+# 9 = highest MoGe level (~800k points, ~0.75 mm spacing)
 RESOLUTION_LEVEL = 9
+
 
 def find_images():
     files = []
@@ -27,45 +26,39 @@ def find_images():
             files.extend(glob.glob(os.path.join(INPUT_DIR, pat)))
     return sorted(set(f for f in files if not os.path.basename(f).startswith(".")))
 
+
 def find_checkpoint(d):
     if os.path.isfile(d):
         return d
-    for c in ["model.pt", "model.pth", "moge.pt", "checkpoint.pt",
-              "pytorch_model.bin", "model.safetensors"]:
+    for c in ["model.pt", "model.pth", "moge.pt"]:
         p = os.path.join(d, c)
         if os.path.isfile(p):
             return p
     for f in os.listdir(d):
-        if f.endswith((".pt", ".pth", ".safetensors", ".bin")):
+        if f.endswith((".pt", ".pth")):
             return os.path.join(d, f)
     return None
 
-def safe_normalize(arr):
-    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
-    lo, hi = arr.min(), arr.max()
-    if hi - lo > 1e-6:
-        return (arr - lo) / (hi - lo)
-    return np.zeros_like(arr)
+
+def safe_normalize(a):
+    a = np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0)
+    lo, hi = a.min(), a.max()
+    return (a - lo) / (hi - lo) if hi - lo > 1e-6 else np.zeros_like(a)
+
 
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     images = find_images()
     if not images:
-        print(f"[ERROR] No images found in {INPUT_DIR}/")
-        sys.exit(1)
-    print(f"[*] Found {len(images)} image(s)")
+        sys.exit("[ERROR] No images in inputs2/")
 
-    ckpt_file = find_checkpoint(MODEL_DIR)
-    if ckpt_file is None:
-        print(f"[ERROR] No checkpoint file found in {MODEL_DIR}")
-        sys.exit(1)
-    print(f"[OK] Using checkpoint: {ckpt_file}")
+    ckpt = find_checkpoint(MODEL_DIR)
+    print(f"[OK] Checkpoint: {ckpt}")
 
     from moge.model.v2 import MoGeModel
     device = torch.device("cpu")
-    model = MoGeModel.from_pretrained(ckpt_file).to(device).eval()
-    model = model.float()
-    print("[OK] MoGe-2 loaded on CPU (float32)")
+    model = MoGeModel.from_pretrained(ckpt).to(device).eval().float()
+    print("[OK] MoGe-2 loaded on CPU")
 
     for img_path in images:
         name = os.path.splitext(os.path.basename(img_path))[0]
@@ -73,83 +66,57 @@ def main():
 
         img_bgr = cv2.imread(img_path)
         if img_bgr is None:
-            print(f"    [ERROR] Could not read image")
+            print(f"    [ERROR] Cannot read image")
             continue
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
         H_img, W_img = img_rgb.shape[:2]
-        print(f"    Input image: W={W_img}, H={H_img}")
-
-        img_tensor = torch.tensor(
-            img_rgb / 255.0, dtype=torch.float32, device=device
-        ).permute(2, 0, 1)
-        print(f"    Input tensor: {img_tensor.shape}, dtype={img_tensor.dtype}")
+        print(f"    Input image: {W_img}x{H_img}")
         print(f"    Resolution level: {RESOLUTION_LEVEL}")
 
+        t = torch.tensor(img_rgb / 255.0, dtype=torch.float32, device=device).permute(2, 0, 1)
+
         with torch.no_grad():
-            out = model.infer(
-                img_tensor,
-                use_fp16=False,
-                resolution_level=RESOLUTION_LEVEL,
-            )
+            out = model.infer(t, use_fp16=False, resolution_level=RESOLUTION_LEVEL)
 
-        points = out.get('points')
-        mask = out.get('mask')
-        depth = out.get('depth')
-        normal = out.get('normal')
-
-        if points is not None: points = points.cpu().numpy()
-        if mask is not None:   mask   = mask.cpu().numpy()
-        if depth is not None:  depth  = depth.cpu().numpy()
-        if normal is not None: normal = normal.cpu().numpy()
-
-        if points is None or mask is None:
-            print(f"    [ERROR] MoGe did not return points/mask")
-            continue
+        points = out["points"].cpu().numpy()
+        mask   = out["mask"].cpu().numpy()
+        depth  = out["depth"].cpu().numpy()
+        normal = out["normal"].cpu().numpy() if "normal" in out else None
 
         H_m, W_m = mask.shape
-        print(f"    MoGe grid: {W_m}x{H_m}")
-        print(f"    Points array: {points.shape}")
-        print(f"    Total grid cells: {H_m * W_m}")
+        print(f"    MoGe grid: {W_m}x{H_m} = {H_m*W_m} points")
+        print(f"    Depth range: {depth[mask > 0.5].min():.3f} - {depth[mask > 0.5].max():.3f} m")
 
-        # ── Save the FULL RAW GRID ──
+        # Save full grids
         np.save(os.path.join(OUTPUT_DIR, f"{name}_points_raw.npy"), points)
         np.save(os.path.join(OUTPUT_DIR, f"{name}_mask_raw.npy"), mask)
-        if depth is not None:
-            np.save(os.path.join(OUTPUT_DIR, f"{name}_depth_raw.npy"), depth)
+        np.save(os.path.join(OUTPUT_DIR, f"{name}_depth_raw.npy"), depth)
         if normal is not None:
             np.save(os.path.join(OUTPUT_DIR, f"{name}_normal_raw.npy"), normal)
 
-        print(f"    [OK] Saved raw grids")
+        # Metadata
+        with open(os.path.join(OUTPUT_DIR, f"{name}_meta.txt"), "w") as f:
+            f.write(f"resolution_level={RESOLUTION_LEVEL}\n")
+            f.write(f"grid={W_m}x{H_m}\n")
+            f.write(f"points={H_m*W_m}\n")
+            f.write(f"image={W_img}x{H_img}\n")
 
-        # ── Depth visualization ──
-        if depth is not None:
-            dv = safe_normalize(depth)
-            cv2.imwrite(
-                os.path.join(OUTPUT_DIR, f"{name}_depth.png"),
-                (dv * 255).astype(np.uint8),
-            )
-            print(f"    [OK] {name}_depth.png")
-
-        # ── Normal visualization ──
+        # Visualizations
+        cv2.imwrite(os.path.join(OUTPUT_DIR, f"{name}_depth.png"),
+                    (safe_normalize(depth) * 255).astype(np.uint8))
         if normal is not None:
-            normal = np.nan_to_num(normal, nan=0.0, posinf=1.0, neginf=-1.0)
-            nv = ((normal + 1.0) / 2.0 * 255).clip(0, 255).astype(np.uint8)
-            cv2.imwrite(os.path.join(OUTPUT_DIR, f"{name}_normal.png"), nv)
-            print(f"    [OK] {name}_normal.png")
+            nv = ((np.nan_to_num(normal, nan=0, posinf=1, neginf=-1) + 1.0) / 2.0 * 255)
+            cv2.imwrite(os.path.join(OUTPUT_DIR, f"{name}_normal.png"), nv.clip(0, 255).astype(np.uint8))
 
-        # ── Full PLY for viewing ──
+        # PLY for viewer (downsampled for smooth loading)
         pts_flat = points.reshape(-1, 3)
-        mask_flat = mask.reshape(-1).astype(bool)
-        valid_pts = pts_flat[mask_flat]
-        valid_pts = np.nan_to_num(valid_pts, nan=0.0, posinf=0.0, neginf=0.0)
-        if len(valid_pts) > 1000000:
-            idx = np.random.choice(len(valid_pts), 1000000, replace=False)
-            valid_pts = valid_pts[idx]
-        pcd = trimesh.PointCloud(valid_pts)
-        pcd.export(os.path.join(OUTPUT_DIR, f"{name}_points.ply"))
-        print(f"    [OK] {name}_points.ply ({len(valid_pts)} pts)")
+        valid = mask.reshape(-1).astype(bool)
+        valid_pts = np.nan_to_num(pts_flat[valid], nan=0, posinf=0, neginf=0)
+        if len(valid_pts) > 1_500_000:
+            valid_pts = valid_pts[np.random.choice(len(valid_pts), 1_500_000, replace=False)]
+        trimesh.PointCloud(valid_pts).export(os.path.join(OUTPUT_DIR, f"{name}_points.ply"))
+        print(f"    [OK] Saved: {name}_points.ply ({len(valid_pts)} pts)")
 
-    print(f"\n[SUCCESS] Outputs saved to {OUTPUT_DIR}/")
 
 if __name__ == "__main__":
     main()
