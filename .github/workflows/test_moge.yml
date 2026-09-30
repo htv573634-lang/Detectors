@@ -36,8 +36,7 @@ jobs:
       run: |
         cd MoGe
         pip install -e .
-        # Install extra dependencies for image processing and saving
-        pip install opencv-python-headless pillow numpy trimesh
+        pip install opencv-python-headless pillow numpy trimesh huggingface_hub
 
     - name: Download MoGe-2 Model (ViT-L + Normal Head)
       env:
@@ -51,7 +50,13 @@ jobs:
             token='${{ secrets.HF_TOKEN }}'
         )
         "
-        echo "Model downloaded to MoGe/checkpoints/moge-2-vitl-normal"
+
+    - name: List MoGe Checkpoint Files
+      run: |
+        echo "=== Contents of checkpoint dir ==="
+        ls -lh MoGe/checkpoints/moge-2-vitl-normal/ || true
+        echo "=== Any .pt/.pth/.safetensors files? ==="
+        find MoGe/checkpoints/moge-2-vitl-normal/ -type f \( -name "*.pt" -o -name "*.pth" -o -name "*.safetensors" -o -name "*.bin" \) || true
 
     - name: Run MoGe-2 Inference on All Images
       run: python test_moge.py 2>&1 | tee /tmp/moge_output.log
@@ -59,6 +64,10 @@ jobs:
     - name: Show Log Tail
       if: always()
       run: tail -60 /tmp/moge_output.log || true
+
+    - name: List Output Folder
+      if: always()
+      run: ls -lh out_moge/ || true
 
     - name: Upload MoGe Output Artifacts
       uses: actions/upload-artifact@v4
