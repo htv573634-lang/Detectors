@@ -1,5 +1,4 @@
 import os
-import glob
 import numpy as np
 import torch
 import cv2
@@ -13,11 +12,13 @@ NAME = "test-2"
 
 DA_MODEL_ID = "depth-anything/Depth-Anything-V2-Base-hf"
 
-# ── SAFE CONTROLS ──
+# ── CALIBRATED CONTROLS ──
 DA_INTENSITY = 0.5           # Keep low: 0.3 = subtle, 1.0 = strong
-MAX_DELTA_METERS = 0.008     # HARD CAP: ±8 mm per pixel. Never exceed.
+MAX_DELTA_METERS = 0.008     # HARD CAP: ±8 mm per pixel
 DA_BLUR_SIGMA = 6.0
 CORRELATION_THRESHOLD = 0.30
+SMOOTH_ITERATIONS = 10       # Taubin smoothing iterations
+SUBDIVIDE = True             # Midpoint subdivision to smooth grid steps
 
 def get_da_depth(image_path):
     from transformers import pipeline
@@ -45,7 +46,7 @@ def triangulate(points, mask):
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # ── Load MoGe's native output (no reshaping) ──
+    # ── Load MoGe's native output ──
     points = np.load(os.path.join(OUTPUT_DIR, f"{NAME}_points_raw.npy"))
     mask = np.load(os.path.join(OUTPUT_DIR, f"{NAME}_mask_raw.npy"))
     moge_depth = np.load(os.path.join(OUTPUT_DIR, f"{NAME}_depth_raw.npy"))
@@ -59,7 +60,7 @@ def main():
     da_resized = cv2.resize(da_depth, (W_m, H_m), interpolation=cv2.INTER_LINEAR)
     da_norm = (da_resized - da_resized.min()) / (da_resized.max() - da_resized.min() + 1e-8)
 
-    # ── Regression on valid pixels ──
+    # ── Regression ──
     valid = (mask > 0.5) & (np.abs(moge_depth) > 1e-6)
     X = da_norm[valid]
     Y = moge_depth[valid]
@@ -76,41 +77,42 @@ def main():
             X = da_norm[valid]
             A = np.vstack([X, np.ones_like(X)]).T
             a, b = np.linalg.lstsq(A, Y, rcond=None)[0]
-        print(f"    Regression: Z ≈ {a:.4f} * DA + {b:.4f}")
         da_metric = a * da_norm + b
         da_base = cv2.GaussianBlur(da_metric, (0, 0), DA_BLUR_SIGMA)
         da_edges = da_metric - da_base
 
-        # ── CRITICAL: hard clamp before multiplying ──
         raw_delta = DA_INTENSITY * da_edges
         delta_z = np.clip(raw_delta, -MAX_DELTA_METERS, MAX_DELTA_METERS)
-        print(f"    Raw delta range: {raw_delta[valid].min():.4f} - {raw_delta[valid].max():.4f}")
-        print(f"    Clamped to ±{MAX_DELTA_METERS} m")
+        print(f"    DA edges applied (clamped to ±{MAX_DELTA_METERS} m)")
     else:
-        print(f"    [!] Correlation too low. Skipping DA. MoGe alone.")
+        print(f"    [!] Correlation too low. Using MoGe alone.")
 
-    # ── Apply delta as ADDITION, not replacement ──
+    # ── Apply delta as ADDITION ──
     fused_points = points.copy()
-    fused_points[:, :, 2] += delta_z  # ADD, not REPLACE
-    # Also apply same delta to the depth map for consistency in triangulation
-    fused_depth_map = moge_depth + delta_z
+    fused_points[:, :, 2] += delta_z
 
-    print(f"    Fused depth range: {fused_depth_map[valid].min():.3f} - {fused_depth_map[valid].max():.3f}")
-
-    # ── Triangulate MoGe grid ──
+    # ── Triangulate ──
     print("[*] Triangulating...")
     verts, faces = triangulate(fused_points, mask)
-    print(f"    {len(verts)} verts, {len(faces)} faces")
+    print(f"    Raw: {len(verts)} verts, {len(faces)} faces")
 
     mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
 
-    # ── Light cleanup only ──
+    # ── CALIBRATION: Subdivision + Taubin Smoothing ──
     o3d_mesh = o3d.geometry.TriangleMesh(
         o3d.utility.Vector3dVector(mesh.vertices),
         o3d.utility.Vector3iVector(mesh.faces),
     )
     o3d_mesh.remove_degenerate_triangles()
     o3d_mesh.remove_duplicated_vertices()
+
+    if SUBDIVIDE:
+        print("[*] Subdividing to smooth grid steps...")
+        o3d_mesh = o3d_mesh.subdivide_midpoint(number_of_iterations=1)
+        print(f"    After subdivision: {len(o3d_mesh.vertices)} verts")
+
+    print(f"[*] Applying Taubin smoothing ({SMOOTH_ITERATIONS} iterations)...")
+    o3d_mesh = o3d_mesh.filter_smooth_taubin(number_of_iterations=SMOOTH_ITERATIONS)
     o3d_mesh.compute_vertex_normals()
 
     final = trimesh.Trimesh(
