@@ -15,10 +15,10 @@ MODEL_DIR = "MoGe/checkpoints/moge-2-vitl-normal"
 IMAGE_EXTS = ("jpg", "jpeg", "jpge", "png", "bmp", "webp")
 
 # ── Resolution level ──
-# 5  = 50k points (fast, coarse)
-# 7  = 200k points (recommended for detail)
-# 9  = 800k points (highest, slow)
-RESOLUTION_LEVEL = 7
+# 5  = 50k points
+# 7  = 200k points
+# 9  = 800k points (highest detail)
+RESOLUTION_LEVEL = 9
 
 def find_images():
     files = []
@@ -83,6 +83,7 @@ def main():
             img_rgb / 255.0, dtype=torch.float32, device=device
         ).permute(2, 0, 1)
         print(f"    Input tensor: {img_tensor.shape}, dtype={img_tensor.dtype}")
+        print(f"    Resolution level: {RESOLUTION_LEVEL}")
 
         with torch.no_grad():
             out = model.infer(
@@ -108,8 +109,9 @@ def main():
         H_m, W_m = mask.shape
         print(f"    MoGe grid: {W_m}x{H_m}")
         print(f"    Points array: {points.shape}")
+        print(f"    Total grid cells: {H_m * W_m}")
 
-        # ── Save the FULL RAW GRID (no reshaping, no random sampling) ──
+        # ── Save the FULL RAW GRID ──
         np.save(os.path.join(OUTPUT_DIR, f"{name}_points_raw.npy"), points)
         np.save(os.path.join(OUTPUT_DIR, f"{name}_mask_raw.npy"), mask)
         if depth is not None:
@@ -117,7 +119,7 @@ def main():
         if normal is not None:
             np.save(os.path.join(OUTPUT_DIR, f"{name}_normal_raw.npy"), normal)
 
-        print(f"    [OK] Saved raw grids: points/mask/depth/normal")
+        print(f"    [OK] Saved raw grids")
 
         # ── Depth visualization ──
         if depth is not None:
@@ -140,8 +142,8 @@ def main():
         mask_flat = mask.reshape(-1).astype(bool)
         valid_pts = pts_flat[mask_flat]
         valid_pts = np.nan_to_num(valid_pts, nan=0.0, posinf=0.0, neginf=0.0)
-        if len(valid_pts) > 500000:
-            idx = np.random.choice(len(valid_pts), 500000, replace=False)
+        if len(valid_pts) > 1000000:
+            idx = np.random.choice(len(valid_pts), 1000000, replace=False)
             valid_pts = valid_pts[idx]
         pcd = trimesh.PointCloud(valid_pts)
         pcd.export(os.path.join(OUTPUT_DIR, f"{name}_points.ply"))
