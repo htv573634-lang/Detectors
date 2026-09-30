@@ -63,12 +63,6 @@ def generate_patch_image(cvimg, bbox, scale, rot, do_flip, out_shape):
         img = img[:, ::-1, :]
         bb_c_x = img_width - bb_c_x - 1
     trans = cv2.getAffineTransform(
-        np.float32([[0, 0], [bb_width, 0], [0, bb_height]]),
-        np.float32([[out_shape[1] * 0.5, out_shape[0] * 0.5],
-                    [out_shape[1] * 0.5, out_shape[0] * 0.5],
-                    [out_shape[1] * 0.5, out_shape[0] * 0.5]])
-    )
-    trans = cv2.getAffineTransform(
         np.float32([[bb_c_x - bb_width * 0.5, bb_c_y - bb_height * 0.5],
                     [bb_c_x + bb_width * 0.5, bb_c_y - bb_height * 0.5],
                     [bb_c_x - bb_width * 0.5, bb_c_y + bb_height * 0.5]]),
