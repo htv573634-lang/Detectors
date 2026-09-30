@@ -39,16 +39,25 @@ jobs:
         cd PEAR
         mkdir -p model_zoo
         wget -q -O model_zoo/yolov8x.pt https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8x.pt
+        echo "--- Original requirements.txt ---"
+        cat requirements.txt
 
-    - name: Install PEAR Requirements (Fixes missing 'timm')
+    - name: Install PEAR Requirements (CPU-filtered)
       run: |
         cd PEAR
-        pip install -r requirements.txt
-        # Install pytorch3d and chumpy with the correct flag for CPU-only environments
-        pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-isolation || true
+        # Remove torch/torchvision lines (we already have CPU torch installed)
+        grep -viE "^(torch|torchvision|torchaudio)" requirements.txt > /tmp/reqs_cpu.txt || true
+        echo "--- Filtered requirements ---"
+        cat /tmp/reqs_cpu.txt
+        pip install -r /tmp/reqs_cpu.txt
+        # Special installs with --no-build-isolation
         pip install chumpy --no-build-isolation || true
-        # Install our additional dependencies for the inference script
+        pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-isolation || true
+        # Inference dependencies
         pip install ultralytics
+        # Verify
+        python -c "import timm; print('timm OK', timm.__version__)"
+        python -c "import torch; print('torch', torch.__version__)"
 
     - name: Fetch SMPL-X Template from Release
       run: |
