@@ -30,16 +30,15 @@ jobs:
 
     - name: Install PyTorch (CPU)
       run: |
-        pip install --upgrade pip
+        pip install --upgrade pip setuptools wheel
         pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
-    - name: Install Python Packages
+    - name: Install Python Packages (Core)
       run: |
         pip install huggingface_hub
         pip install trimesh numpy scipy open3d
         pip install opencv-python-headless Pillow
-        pip install chumpy
-        # PEAR requires pytorch3d, which we attempt to build for CPU.
+        pip install chumpy --no-build-isolation
         pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-isolation || true
 
     - name: Clone PEAR
