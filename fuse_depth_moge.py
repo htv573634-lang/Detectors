@@ -17,10 +17,13 @@ OUTPUT_GLB = os.path.join(OUTPUT_DIR, "test-2_mesh_fused.glb")
 OUTPUT_FUSED_DEPTH = os.path.join(OUTPUT_DIR, "test-2_depth_fused.png")
 
 # --- INTENSITY CONTROLS ---
-BLEND_MOGE_WEIGHT = 0.45     # Lower = more DA detail, less MoGe smoothness
-DA_MODEL_ID = "depth-anything/Depth-Anything-V2-Base-hf"   # upgraded from Small
-POISSON_DEPTH = 11           # higher = finer mesh (was 9)
-DENSITY_QUANTILE = 0.03      # lower trim (was 0.05)
+DA_MODEL_ID = "depth-anything/Depth-Anything-V2-Base-hf"
+DA_INTENSITY = 4.0           # ⭐ THE MAIN KNOB: 1.0=subtle, 4.0=strong, 6.0=extreme
+DA_BLUR_SIGMA = 5.0          # Higher = only very sharp edges pass through
+MOGE_SMOOTH_SIGMA = 0.0      # Set >0 to smooth MoGe before adding DA edges
+
+POISSON_DEPTH = 11
+DENSITY_QUANTILE = 0.02
 
 def find_latest(pattern):
     files = glob.glob(pattern)
@@ -61,6 +64,7 @@ def fuse_depths(img_path, ply_path):
     n = len(pts)
     print(f"[*] MoGe points: {n}")
 
+    # Determine grid shape
     aspect = W / H
     H_m = int(round(np.sqrt(n / aspect)))
     W_m = int(round(n / H_m))
@@ -78,16 +82,15 @@ def fuse_depths(img_path, ply_path):
     moge_depth = points_grid[:, :, 2]
     print(f"    MoGe depth range: {moge_depth.min():.3f} - {moge_depth.max():.3f}")
 
+    # --- Get DA and resize ---
     da_depth = get_da_depth(img_path)
     da_resized = cv2.resize(da_depth, (W_m, H_m), interpolation=cv2.INTER_LINEAR)
     da_norm = (da_resized - da_resized.min()) / (da_resized.max() - da_resized.min() + 1e-8)
 
+    # --- Align DA to MoGe metric via regression ---
     valid_mask = np.abs(moge_depth) > 1e-6
     n_valid = int(valid_mask.sum())
     print(f"    Valid pixels: {n_valid} / {H_m * W_m}")
-
-    if n_valid < 100:
-        raise RuntimeError("Too few valid pixels for regression")
 
     X = da_norm[valid_mask]
     Y = moge_depth[valid_mask]
@@ -96,17 +99,40 @@ def fuse_depths(img_path, ply_path):
     print(f"    Regression: metric ≈ {a:.4f} * da_norm + {b:.4f}")
 
     da_metric = a * da_norm + b
-    fused_depth = BLEND_MOGE_WEIGHT * moge_depth + (1 - BLEND_MOGE_WEIGHT) * da_metric
+
+    # --- HIGH-FREQUENCY TRANSFER ---
+    # Step 1: smooth DA → get base layer
+    da_base = cv2.GaussianBlur(da_metric, (0, 0), DA_BLUR_SIGMA)
+    # Step 2: extract edges/details = da - da_base
+    da_edges = da_metric - da_base
+    # Step 3: optionally smooth MoGe
+    if MOGE_SMOOTH_SIGMA > 0:
+        moge_base = cv2.GaussianBlur(moge_depth, (0, 0), MOGE_SMOOTH_SIGMA)
+    else:
+        moge_base = moge_depth.copy()
+    # Step 4: fused = MoGe base + amplified DA edges
+    fused_depth = moge_base + DA_INTENSITY * da_edges
+
+    print(f"[*] DA edges range: {da_edges.min():.4f} - {da_edges.max():.4f}")
+    print(f"[*] DA_INTENSITY = {DA_INTENSITY}")
+    print(f"[*] Fused depth range: {fused_depth.min():.3f} - {fused_depth.max():.3f}")
+
+    # Preserve invalid regions
     fused_depth[~valid_mask] = moge_depth[~valid_mask]
 
     fused_points = points_grid.copy()
     fused_points[:, :, 2] = fused_depth
 
+    # Save vis
     vis = fused_depth.copy()
     vis[~valid_mask] = vis[valid_mask].min()
     vis_norm = (vis - vis.min()) / (vis.max() - vis.min() + 1e-8)
     cv2.imwrite(OUTPUT_FUSED_DEPTH, (vis_norm * 255).astype(np.uint8))
     print(f"[OK] Fused depth vis: {OUTPUT_FUSED_DEPTH}")
+
+    # Also save the edges map alone for debugging
+    edges_vis = ((da_edges - da_edges.min()) / (da_edges.max() - da_edges.min() + 1e-8) * 255).astype(np.uint8)
+    cv2.imwrite(os.path.join(OUTPUT_DIR, "test-2_da_edges.png"), edges_vis)
 
     return fused_points, valid_mask
 
@@ -114,10 +140,6 @@ def poisson_mesh_from_points(pts, output_obj):
     print(f"[*] Poisson reconstruction from {len(pts)} points...")
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
-
-    if len(pcd.points) > 200000:
-        print(f"    Downsampling...")
-        pcd = pcd.voxel_down_sample(voxel_size=0.003)
 
     print("[*] Estimating normals...")
     pcd.estimate_normals(
