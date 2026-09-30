@@ -9,16 +9,22 @@ import open3d as o3d
 INPUT_IMAGE = "inputs2/test-2.png"
 OUTPUT_DIR = "out_moge"
 
-# ── DA SETTINGS (matched to the good run) ──
+# ── DA SETTINGS ──
 DA_MODEL_ID = "depth-anything/Depth-Anything-V2-Base-hf"
-DA_INTENSITY = 0.50           # Strong detail layer
-MAX_DELTA_METERS = 0.008      # Clamp to ±8 mm (this produced the 12 MB result)
+DA_INTENSITY = 0.50
+MAX_DELTA_METERS = 0.008
 DA_BLUR_SIGMA = 6.0
 CORRELATION_THRESHOLD = 0.30
 
+# ── LINE-REMOVAL SETTINGS ──
+DEPTH_BILATERAL_D = 7          # filter diameter
+DEPTH_BILATERAL_SIGMA_COLOR = 0.02   # ← LOW value preserves features
+DEPTH_BILATERAL_SIGMA_SPACE = 4      # ← only smooths close neighbors (row-to-row)
+DEPTH_GAUSSIAN_SIGMA = 0.8     # gentle Gaussian after bilateral
+
 # ── MESH QUALITY ──
-SUBDIVIDE = True              # Midpoint subdivision for smooth surface
-SMOOTH_ITERS = 10             # Taubin iterations
+SUBDIVIDE_PASSES = 2           # was 1 → now 2 (finer surface)
+SMOOTH_ITERS = 8               # was 10 → now 8 (preserve detail on finer mesh)
 
 
 def find_name():
@@ -59,7 +65,7 @@ def main():
     NAME = find_name()
     print(f"[*] Processing: {NAME}")
 
-    # ── Load MoGe raw grids ──
+    # Load MoGe raw grids
     points = np.load(os.path.join(OUTPUT_DIR, f"{NAME}_points_raw.npy"))
     mask   = np.load(os.path.join(OUTPUT_DIR, f"{NAME}_mask_raw.npy"))
     moge_depth = np.load(os.path.join(OUTPUT_DIR, f"{NAME}_depth_raw.npy"))
@@ -76,7 +82,7 @@ def main():
     da_resized = cv2.resize(da_depth, (W_m, H_m), interpolation=cv2.INTER_LINEAR)
     da_norm = (da_resized - da_resized.min()) / (da_resized.max() - da_resized.min() + 1e-8)
 
-    # ── Correlation check ──
+    # ── Correlation ──
     X = da_norm[valid]
     Y = moge_depth[valid]
     corr = np.corrcoef(X, Y)[0, 1]
@@ -86,19 +92,14 @@ def main():
     delta_z = np.zeros_like(moge_depth)
 
     if abs(corr) >= CORRELATION_THRESHOLD:
-        # Linear regression to align DA to MoGe's metric scale
         A = np.vstack([X, np.ones_like(X)]).T
         a, b = np.linalg.lstsq(A, Y, rcond=None)[0]
-        print(f"    Regression: Z ≈ {a:.4f} * DA + {b:.4f}")
-
-        # Auto-flip if inverted
         if a > 0:
             print(f"    [FIX] DA inverted. Flipping.")
             da_norm = 1.0 - da_norm
             X = da_norm[valid]
             A = np.vstack([X, np.ones_like(X)]).T
             a, b = np.linalg.lstsq(A, Y, rcond=None)[0]
-            print(f"    Corrected: Z ≈ {a:.4f} * DA + {b:.4f}")
 
         da_metric = a * da_norm + b
         da_base = cv2.GaussianBlur(da_metric, (0, 0), DA_BLUR_SIGMA)
@@ -106,24 +107,48 @@ def main():
 
         raw_delta = DA_INTENSITY * da_edges
         delta_z = np.clip(raw_delta, -MAX_DELTA_METERS, MAX_DELTA_METERS)
-        print(f"    DA_INTENSITY = {DA_INTENSITY}")
-        print(f"    MAX_DELTA    = ±{MAX_DELTA_METERS} m")
-        print(f"    Delta range  = {delta_z[valid].min():.5f} to {delta_z[valid].max():.5f}")
+        print(f"    Delta range = {delta_z[valid].min():.5f} to {delta_z[valid].max():.5f}")
     else:
-        print(f"    [SKIP] Correlation too low (< {CORRELATION_THRESHOLD})")
+        print(f"    [SKIP] Correlation too low")
 
-    # ── Apply delta to MoGe Z ──
+    # ── Apply DA delta ──
+    fused_depth = moge_depth + delta_z
     fused_points = points.copy()
-    fused_points[:, :, 2] += delta_z
+    fused_points[:, :, 2] = fused_depth
+
+    # ══════════════════════════════════════════════
+    # ── LINE-REMOVAL STEP: SMOOTH THE DEPTH GRID ──
+    # Bilateral filter removes row-to-row jumps.
+    # Applied to the Z-channel of the point grid.
+    # ══════════════════════════════════════════════
+    print("\n[*] Applying bilateral filter to remove grid terracing...")
+
+    # First: bilateral on the depth (row-to-row smoothing, feature-preserving)
+    z_channel = fused_points[:, :, 2].astype(np.float32)
+    z_smooth = cv2.bilateralFilter(
+        z_channel,
+        d=DEPTH_BILATERAL_D,
+        sigmaColor=DEPTH_BILATERAL_SIGMA_COLOR,
+        sigmaSpace=DEPTH_BILATERAL_SIGMA_SPACE,
+    )
+
+    # Second: gentle Gaussian to blend the seams
+    z_smooth = cv2.GaussianBlur(z_smooth, (0, 0), DEPTH_GAUSSIAN_SIGMA)
+
+    # Preserve mask: don't smooth over invalid pixels
+    z_smooth[~valid] = z_channel[~valid]
+
+    fused_points[:, :, 2] = z_smooth
+    print(f"    Z-channel: raw range [{z_channel[valid].min():.4f}, {z_channel[valid].max():.4f}]")
+    print(f"    Z-channel: smoothed range [{z_smooth[valid].min():.4f}, {z_smooth[valid].max():.4f}]")
 
     # ── Triangulate ──
-    print("\n[*] Triangulating MoGe grid...")
+    print("\n[*] Triangulating...")
     verts, faces = triangulate(fused_points, mask)
     print(f"    Raw: {len(verts)} verts, {len(faces)} faces")
 
     mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
 
-    # ── Convert to Open3D for cleanup + subdivision + smoothing ──
     o3d_mesh = o3d.geometry.TriangleMesh(
         o3d.utility.Vector3dVector(mesh.vertices),
         o3d.utility.Vector3iVector(mesh.faces),
@@ -133,11 +158,13 @@ def main():
     o3d_mesh.remove_duplicated_triangles()
     o3d_mesh.remove_unreferenced_vertices()
 
-    if SUBDIVIDE:
-        print("[*] Midpoint subdivision (1 pass)...")
+    # ── Subdivision (2 passes for finer surface) ──
+    for i in range(SUBDIVIDE_PASSES):
+        print(f"[*] Subdivision pass {i+1}/{SUBDIVIDE_PASSES}...")
         o3d_mesh = o3d_mesh.subdivide_midpoint(number_of_iterations=1)
-        print(f"    After subdivision: {len(o3d_mesh.vertices)} verts")
+        print(f"    {len(o3d_mesh.vertices)} verts, {len(o3d_mesh.triangles)} faces")
 
+    # ── Taubin smoothing ──
     print(f"[*] Taubin smoothing ({SMOOTH_ITERS} iterations)...")
     o3d_mesh = o3d_mesh.filter_smooth_taubin(number_of_iterations=SMOOTH_ITERS)
     o3d_mesh.compute_vertex_normals()
