@@ -28,10 +28,10 @@ jobs:
       with:
         python-version: "3.10"
 
-    - name: Install PyTorch (CPU)
+    - name: Install PyTorch (CPU) - Pinned Version
       run: |
         pip install --upgrade pip setuptools wheel
-        pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+        pip install torch==2.0.1 torchvision==0.15.2 --index-url https://download.pytorch.org/whl/cpu
 
     - name: Clone PEAR
       run: |
@@ -43,21 +43,14 @@ jobs:
     - name: Install PEAR Requirements (CPU-filtered)
       run: |
         cd PEAR
-        # Remove torch/torchvision lines (we already have CPU torch installed)
         grep -viE "^(torch|torchvision|torchaudio)" requirements.txt > /tmp/reqs_cpu.txt || true
         pip install -r /tmp/reqs_cpu.txt
-        # Install chumpy with the correct flag
         pip install chumpy --no-build-isolation || true
-        # CRITICAL FIX: Install pre-built pytorch3d CPU wheel from miropsota index
-        # This matches the installed torch version (2.0.1 CPU)
         pip install --extra-index-url https://miropsota.github.io/torch_packages_builder \
             "pytorch3d==0.7.8+pt2.0.1cpu"
-        # Inference dependencies
         pip install ultralytics
-        # Verify critical imports
+        python -c "import torch; print('torch:', torch.__version__)"
         python -c "import pytorch3d; print('pytorch3d OK')"
-        python -c "import timm; print('timm OK')"
-        python -c "import torch; print('torch', torch.__version__)"
 
     - name: Fetch SMPL-X Template from Release
       run: |
