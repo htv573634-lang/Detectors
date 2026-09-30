@@ -42,14 +42,14 @@ jobs:
         key: moge-ckpt-vitl-normal-${{ runner.os }}-v1
         restore-keys: moge-ckpt-vitl-normal-${{ runner.os }}-
 
-    # ── SYSTEM SETUP (with Open3D dependencies) ──
+    # ── SYSTEM SETUP ──
     - name: Install System Dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
           build-essential cmake git wget \
           libgl1 libglib2.0-0 \
-          libegl1 libegl-mesa0 libglx-mesa0 libgles2-mesa \
+          libegl1 libegl-mesa0 libglx-mesa0 libgles2 \
           libx11-6 libxext6 libxrender1 libsm6
 
     - name: Set up Python 3.10
