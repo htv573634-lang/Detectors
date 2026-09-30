@@ -16,7 +16,7 @@ jobs:
           ref: main
 
       # ── CLEAN: remove stale outputs from previous runs ──
-      - name: Clean previous HMR2.0 outputs
+      - name: Clean previous outputs
         run: |
           rm -rf out_hmr2/
           mkdir -p out_hmr2/
@@ -122,6 +122,7 @@ jobs:
         run: |
           pip install opencv-python-headless pillow numpy trimesh
           pip install smplx
+          pip install xatlas
 
       - name: Download SMPL files
         run: |
@@ -143,7 +144,7 @@ jobs:
           wget -q --show-progress -O checkpoints/epoch=35-step=1000000.ckpt \
             "https://huggingface.co/spaces/brjathu/HMR2.0/resolve/main/logs/train/multiruns/hmr2/0/checkpoints/epoch%3D35-step%3D1000000.ckpt"
 
-      - name: Run test
+      - name: Run HMR2.0
         id: main_test
         env:
           SMPL_GENDER: female
@@ -152,9 +153,17 @@ jobs:
         continue-on-error: true
         run: python -u test_hmr2.py 2>&1 | tee /tmp/test_output.log
 
-      - name: Show log tail
+      - name: Show HMR2.0 log tail
         if: always()
         run: tail -80 /tmp/test_output.log 2>/dev/null || echo "No log"
+
+      - name: Add micro-details to mesh
+        if: success()
+        run: python -u add_micro_details.py 2>&1 | tee /tmp/details_output.log
+
+      - name: Show micro-details log tail
+        if: always()
+        run: tail -50 /tmp/details_output.log 2>/dev/null || echo "No details log"
 
       - name: List current-run outputs
         if: always()
@@ -172,12 +181,11 @@ jobs:
       - uses: stefanzweifel/git-auto-commit-action@v5
         if: success()
         with:
-          commit_message: "Test HMR2.0 female output"
+          commit_message: "HMR2.0 + micro-details output"
           file_pattern: "out_hmr2/*"
           branch: main
           push_options: '--force-with-lease'
 
-      # ── ARTIFACT: only current-run files ──
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -185,4 +193,5 @@ jobs:
           path: |
             out_hmr2/
             /tmp/test_output.log
+            /tmp/details_output.log
           if-no-files-found: warn
