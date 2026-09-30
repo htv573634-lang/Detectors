@@ -24,17 +24,14 @@ def find_images():
     return files
 
 def find_checkpoint(model_dir):
-    """Find the actual .pt/.pth/.safetensors file inside the directory."""
     if os.path.isfile(model_dir):
         return model_dir
     if not os.path.isdir(model_dir):
         return None
-    # Preferred names
     for c in ["model.pt", "model.pth", "moge.pt", "checkpoint.pt", "pytorch_model.bin", "model.safetensors"]:
         p = os.path.join(model_dir, c)
         if os.path.isfile(p):
             return p
-    # Fallback: any model-like file
     for f in os.listdir(model_dir):
         if f.endswith((".pt", ".pth", ".safetensors", ".bin")):
             return os.path.join(model_dir, f)
@@ -48,19 +45,18 @@ def main():
         sys.exit(1)
     print(f"[*] Found {len(images)} image(s)")
 
-    print(f"[*] Looking for checkpoint in: {MODEL_DIR}")
     ckpt_file = find_checkpoint(MODEL_DIR)
     if ckpt_file is None:
         print(f"[ERROR] No checkpoint file found in {MODEL_DIR}")
-        if os.path.isdir(MODEL_DIR):
-            print(f"        Directory contents: {os.listdir(MODEL_DIR)}")
         sys.exit(1)
     print(f"[OK] Using checkpoint: {ckpt_file}")
 
     from moge.model.v2 import MoGeModel
     device = torch.device("cpu")
     model = MoGeModel.from_pretrained(ckpt_file).to(device).eval()
-    print("[OK] MoGe-2 loaded on CPU")
+    # Force model to float32 for CPU
+    model = model.float()
+    print("[OK] MoGe-2 loaded on CPU (float32)")
 
     for img_path in images:
         name = os.path.splitext(os.path.basename(img_path))[0]
@@ -72,13 +68,15 @@ def main():
             continue
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-        # Normalize to [0,1] and convert to tensor (3, H, W)
+        # Create float32 tensor (3, H, W)
         img_tensor = torch.tensor(img_rgb / 255.0, dtype=torch.float32, device=device).permute(2, 0, 1)
 
-        with torch.no_grad():
-            output = model.infer(img_tensor)
+        print(f"    Input tensor: shape={img_tensor.shape}, dtype={img_tensor.dtype}")
 
-        # Extract
+        with torch.no_grad():
+            # KEY FIX: use_fp16=False for CPU
+            output = model.infer(img_tensor, use_fp16=False, resolution_level=5)
+
         points = output.get('points')
         depth = output.get('depth')
         mask = output.get('mask')
@@ -89,19 +87,16 @@ def main():
         if mask is not None: mask = mask.cpu().numpy()
         if normal is not None: normal = normal.cpu().numpy()
 
-        # Depth vis
         if depth is not None:
             dv = (depth - depth.min()) / (depth.max() - depth.min() + 1e-8)
             cv2.imwrite(os.path.join(OUTPUT_DIR, f"{name}_depth.png"), (dv * 255).astype(np.uint8))
             print(f"    [OK] {name}_depth.png")
 
-        # Normal vis
         if normal is not None:
             nv = ((normal + 1.0) / 2.0 * 255).astype(np.uint8)
             cv2.imwrite(os.path.join(OUTPUT_DIR, f"{name}_normal.png"), nv)
             print(f"    [OK] {name}_normal.png")
 
-        # Point cloud
         if points is not None and mask is not None:
             pts = points.reshape(-1, 3)
             m = mask.reshape(-1).astype(bool)
