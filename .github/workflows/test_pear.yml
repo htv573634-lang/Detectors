@@ -28,10 +28,11 @@ jobs:
       with:
         python-version: "3.10"
 
-    - name: Install PyTorch (CPU) - Pinned Version
+    - name: Install PyTorch (CPU)
       run: |
         pip install --upgrade pip setuptools wheel
         pip install torch==2.0.1 torchvision==0.15.2 --index-url https://download.pytorch.org/whl/cpu
+        python -c "import torch; print('torch:', torch.__version__)"
 
     - name: Clone PEAR
       run: |
@@ -46,11 +47,21 @@ jobs:
         grep -viE "^(torch|torchvision|torchaudio)" requirements.txt > /tmp/reqs_cpu.txt || true
         pip install -r /tmp/reqs_cpu.txt
         pip install chumpy --no-build-isolation || true
-        pip install --extra-index-url https://miropsota.github.io/torch_packages_builder \
-            "pytorch3d==0.7.8+pt2.0.1cpu"
-        pip install ultralytics
-        python -c "import torch; print('torch:', torch.__version__)"
+
+    - name: Build pytorch3d from Source (CPU-only)
+      run: |
+        export PYTORCH3D_FORCE_NO_CUDA=1
+        export MAX_JOBS=1
+        pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-isolation
+      continue-on-error: true
+
+    - name: Verify pytorch3d
+      run: |
         python -c "import pytorch3d; print('pytorch3d OK')"
+        python -c "import torch; print('torch', torch.__version__)"
+
+    - name: Install Inference Dependencies
+      run: pip install ultralytics
 
     - name: Fetch SMPL-X Template from Release
       run: |
