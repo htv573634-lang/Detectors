@@ -13,12 +13,12 @@ NAME = "test-2"
 DA_MODEL_ID = "depth-anything/Depth-Anything-V2-Base-hf"
 
 # ── CALIBRATED CONTROLS ──
-DA_INTENSITY = 0.5           # Keep low: 0.3 = subtle, 1.0 = strong
-MAX_DELTA_METERS = 0.008     # HARD CAP: ±8 mm per pixel
+DA_INTENSITY = 0.35          # ⭐ Lowered from 0.5 → 0.35
+MAX_DELTA_METERS = 0.006     # Tightened slightly for even smoother surface
 DA_BLUR_SIGMA = 6.0
 CORRELATION_THRESHOLD = 0.30
-SMOOTH_ITERATIONS = 10       # Taubin smoothing iterations
-SUBDIVIDE = True             # Midpoint subdivision to smooth grid steps
+SMOOTH_ITERATIONS = 8        # Slightly fewer to preserve detail at high res
+SUBDIVIDE = False            # Skip subdivision at res=9 (already dense enough)
 
 def get_da_depth(image_path):
     from transformers import pipeline
@@ -52,7 +52,8 @@ def main():
     moge_depth = np.load(os.path.join(OUTPUT_DIR, f"{NAME}_depth_raw.npy"))
     H_m, W_m = mask.shape
     print(f"[*] MoGe grid: {W_m}x{H_m}")
-    print(f"    MoGe depth range: {moge_depth[mask > 0.5].min():.3f} - {moge_depth[mask > 0.5].max():.3f}")
+    valid_pre = mask > 0.5
+    print(f"    MoGe depth range: {moge_depth[valid_pre].min():.3f} - {moge_depth[valid_pre].max():.3f}")
 
     # ── DA inference ──
     print("[*] Running Depth Anything V2 Base...")
@@ -77,13 +78,15 @@ def main():
             X = da_norm[valid]
             A = np.vstack([X, np.ones_like(X)]).T
             a, b = np.linalg.lstsq(A, Y, rcond=None)[0]
+        print(f"    Regression: Z ≈ {a:.4f} * DA + {b:.4f}")
         da_metric = a * da_norm + b
         da_base = cv2.GaussianBlur(da_metric, (0, 0), DA_BLUR_SIGMA)
         da_edges = da_metric - da_base
 
         raw_delta = DA_INTENSITY * da_edges
         delta_z = np.clip(raw_delta, -MAX_DELTA_METERS, MAX_DELTA_METERS)
-        print(f"    DA edges applied (clamped to ±{MAX_DELTA_METERS} m)")
+        print(f"    DA_INTENSITY = {DA_INTENSITY}, MAX_DELTA = {MAX_DELTA_METERS} m")
+        print(f"    Delta range: {delta_z[valid].min():.5f} - {delta_z[valid].max():.5f}")
     else:
         print(f"    [!] Correlation too low. Using MoGe alone.")
 
@@ -98,7 +101,7 @@ def main():
 
     mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
 
-    # ── CALIBRATION: Subdivision + Taubin Smoothing ──
+    # ── Calibration: light cleanup + Taubin smoothing ──
     o3d_mesh = o3d.geometry.TriangleMesh(
         o3d.utility.Vector3dVector(mesh.vertices),
         o3d.utility.Vector3iVector(mesh.faces),
@@ -107,11 +110,11 @@ def main():
     o3d_mesh.remove_duplicated_vertices()
 
     if SUBDIVIDE:
-        print("[*] Subdividing to smooth grid steps...")
+        print("[*] Subdividing...")
         o3d_mesh = o3d_mesh.subdivide_midpoint(number_of_iterations=1)
         print(f"    After subdivision: {len(o3d_mesh.vertices)} verts")
 
-    print(f"[*] Applying Taubin smoothing ({SMOOTH_ITERATIONS} iterations)...")
+    print(f"[*] Taubin smoothing ({SMOOTH_ITERATIONS} iterations)...")
     o3d_mesh = o3d_mesh.filter_smooth_taubin(number_of_iterations=SMOOTH_ITERATIONS)
     o3d_mesh.compute_vertex_normals()
 
