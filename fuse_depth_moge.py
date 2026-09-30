@@ -13,12 +13,12 @@ NAME = "test-2"
 DA_MODEL_ID = "depth-anything/Depth-Anything-V2-Base-hf"
 
 # ── CALIBRATED CONTROLS ──
-DA_INTENSITY = 0.35          # ⭐ Lowered from 0.5 → 0.35
-MAX_DELTA_METERS = 0.006     # Tightened slightly for even smoother surface
+DA_INTENSITY = 0.20          # ⭐ Lowered from 0.35 → 0.20
+MAX_DELTA_METERS = 0.004     # ⭐ Tightened from 0.006 → 0.004
 DA_BLUR_SIGMA = 6.0
 CORRELATION_THRESHOLD = 0.30
-SMOOTH_ITERATIONS = 8        # Slightly fewer to preserve detail at high res
-SUBDIVIDE = False            # Skip subdivision at res=9 (already dense enough)
+SMOOTH_ITERATIONS = 8
+SUBDIVIDE = False
 
 def get_da_depth(image_path):
     from transformers import pipeline
@@ -46,7 +46,6 @@ def triangulate(points, mask):
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # ── Load MoGe's native output ──
     points = np.load(os.path.join(OUTPUT_DIR, f"{NAME}_points_raw.npy"))
     mask = np.load(os.path.join(OUTPUT_DIR, f"{NAME}_mask_raw.npy"))
     moge_depth = np.load(os.path.join(OUTPUT_DIR, f"{NAME}_depth_raw.npy"))
@@ -55,13 +54,11 @@ def main():
     valid_pre = mask > 0.5
     print(f"    MoGe depth range: {moge_depth[valid_pre].min():.3f} - {moge_depth[valid_pre].max():.3f}")
 
-    # ── DA inference ──
     print("[*] Running Depth Anything V2 Base...")
     da_depth = get_da_depth(INPUT_IMAGE)
     da_resized = cv2.resize(da_depth, (W_m, H_m), interpolation=cv2.INTER_LINEAR)
     da_norm = (da_resized - da_resized.min()) / (da_resized.max() - da_resized.min() + 1e-8)
 
-    # ── Regression ──
     valid = (mask > 0.5) & (np.abs(moge_depth) > 1e-6)
     X = da_norm[valid]
     Y = moge_depth[valid]
@@ -90,18 +87,15 @@ def main():
     else:
         print(f"    [!] Correlation too low. Using MoGe alone.")
 
-    # ── Apply delta as ADDITION ──
     fused_points = points.copy()
     fused_points[:, :, 2] += delta_z
 
-    # ── Triangulate ──
     print("[*] Triangulating...")
     verts, faces = triangulate(fused_points, mask)
     print(f"    Raw: {len(verts)} verts, {len(faces)} faces")
 
     mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
 
-    # ── Calibration: light cleanup + Taubin smoothing ──
     o3d_mesh = o3d.geometry.TriangleMesh(
         o3d.utility.Vector3dVector(mesh.vertices),
         o3d.utility.Vector3iVector(mesh.faces),
@@ -112,7 +106,6 @@ def main():
     if SUBDIVIDE:
         print("[*] Subdividing...")
         o3d_mesh = o3d_mesh.subdivide_midpoint(number_of_iterations=1)
-        print(f"    After subdivision: {len(o3d_mesh.vertices)} verts")
 
     print(f"[*] Taubin smoothing ({SMOOTH_ITERATIONS} iterations)...")
     o3d_mesh = o3d_mesh.filter_smooth_taubin(number_of_iterations=SMOOTH_ITERATIONS)
