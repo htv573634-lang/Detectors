@@ -4,18 +4,18 @@
     "results": [
       {
         "model": "DepthPro",
-        "status": "error",
-        "reason": "create_model_and_transforms() got an unexpected keyword argument 'checkpoint_uri'"
+        "status": "ok",
+        "depth_min": 5.033514022827148,
+        "depth_max": 13.646733283996582,
+        "valid_points": 374816,
+        "glb": "out_fusion/IMG_20260930_013705/IMG_20260930_013705_depthpro.glb"
       },
       {
         "model": "UniDepth V2",
-        "status": "ok",
-        "depth_min": 2.1252105236053467,
-        "depth_max": 5.9662370681762695,
-        "valid_points": 374816,
-        "glb": "out_fusion/IMG_20260930_013705/IMG_20260930_013705_unidepth.glb"
+        "status": "error",
+        "reason": "No module named 'wandb'"
       }
     ],
-    "best_by_dense_points": "UniDepth V2"
+    "best_by_dense_points": "DepthPro"
   }
 }
