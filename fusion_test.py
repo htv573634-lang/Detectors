@@ -87,7 +87,9 @@ def run_depthpro(img_rgb, out_dir, base_name):
     try:
         import depth_pro
         device = torch.device("cpu")
-        model, transform = depth_pro.create_model_and_transforms()
+        model, transform = depth_pro.create_model_and_transforms(
+            checkpoint_uri='checkpoints/depthpro/depth_pro.pt'
+        )
         model.eval().to(device)
 
         img_pil = Image.fromarray(img_rgb)
