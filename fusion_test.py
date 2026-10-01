@@ -86,10 +86,19 @@ def run_depthpro(img_rgb, out_dir, base_name):
     log("[DepthPro] Running...")
     try:
         import depth_pro
+        from depth_pro.depth_pro import DepthProConfig
+
         device = torch.device("cpu")
-        model, transform = depth_pro.create_model_and_transforms(
-            checkpoint_uri='checkpoints/depthpro/depth_pro.pt'
+
+        config = DepthProConfig(
+            patch_encoder_preset="dinov2l16_384",
+            image_encoder_preset="dinov2l16_384",
+            checkpoint_uri="checkpoints/depthpro/depth_pro.pt",
+            decoder_features=256,
+            use_fov_head=True,
+            fov_encoder_preset="dinov2l16_384",
         )
+        model, transform = depth_pro.create_model_and_transforms(config=config)
         model.eval().to(device)
 
         img_pil = Image.fromarray(img_rgb)
