@@ -1,13 +1,9 @@
 torch
 torchvision
-insightface
-onnxruntime
-smplx
-mediapipe
-transformers
-diffusers
-accelerate
+numpy
 opencv-python-headless
 Pillow
-PyYAML
 trimesh
+open3d
+huggingface_hub
+onnxruntime
