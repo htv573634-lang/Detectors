@@ -1,0 +1,116 @@
+name: Test Fusion Models (DepthPro + UniDepth V2)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'fusion_test.py'
+      - 'inputs/**'
+
+permissions:
+  contents: write
+
+jobs:
+  test-fusion:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Clean previous fusion outputs
+      run: |
+        rm -rf out_fusion/
+        mkdir -p out_fusion/
+        echo "[OK] out_fusion/ cleared"
+
+    - name: Cache pip
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: pip-fusion-${{ runner.os }}-v1
+        restore-keys: pip-fusion-${{ runner.os }}-
+
+    - name: Install system deps
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          build-essential cmake git wget \
+          libgl1 libglib2.0-0 \
+          libegl1 libegl-mesa0 libglx-mesa0 libgles2 \
+          libx11-6 libxext6 libxrender1 libsm6
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+
+    - name: Install PyTorch (CPU)
+      run: |
+        pip install --upgrade pip
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+    - name: Install Python packages
+      run: |
+        pip install opencv-python-headless pillow numpy trimesh open3d
+        pip install huggingface_hub onnxruntime
+
+    - name: Install DepthPro
+      run: |
+        pip install git+https://github.com/apple/ml-depth-pro.git
+        pip install pillow_heif
+
+    - name: Install UniDepth
+      run: |
+        pip install git+https://github.com/lpiccinelli-eth/UniDepth.git
+
+    - name: Download DepthPro checkpoint
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: |
+        python -c "
+        from huggingface_hub import snapshot_download
+        snapshot_download(repo_id='apple/DepthPro',
+                          local_dir='checkpoints/depthpro',
+                          token='${{ secrets.HF_TOKEN }}')
+        "
+
+    - name: Verify checkpoints
+      run: |
+        echo '=== DepthPro checkpoint ==='
+        ls -lh checkpoints/depthpro/ || echo 'missing'
+
+    - name: Run fusion test
+      run: python fusion_test.py 2>&1 | tee /tmp/fusion.log
+
+    - name: Show log tail
+      if: always()
+      run: tail -120 /tmp/fusion.log || true
+
+    - name: List outputs
+      if: always()
+      run: |
+        echo '=== out_fusion/ ==='
+        find out_fusion -name '*.glb' | sort
+        echo ''
+        du -sh out_fusion/ 2>/dev/null || echo 'empty'
+
+    - name: Commit outputs
+      uses: stefanzweifel/git-auto-commit-action@v5
+      with:
+        commit_message: "chore: run DepthPro + UniDepth V2 comparison"
+        branch: main
+        file_pattern: "out_fusion/"
+
+    - name: Upload artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: fusion-output-${{ github.run_number }}
+        path: |
+          out_fusion/
+          /tmp/fusion.log
+        if-no-files-found: warn
