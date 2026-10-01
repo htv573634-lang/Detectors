@@ -31,7 +31,7 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ~/.cache/pip
-        key: pip-fusion-${{ runner.os }}-v1
+        key: pip-fusion-${{ runner.os }}-v2
         restore-keys: pip-fusion-${{ runner.os }}-
 
     - name: Install system deps
@@ -55,7 +55,7 @@ jobs:
 
     - name: Install Python packages
       run: |
-        pip install opencv-python-headless pillow numpy trimesh open3d
+        pip install "numpy<2" opencv-python-headless pillow trimesh open3d
         pip install huggingface_hub onnxruntime
 
     - name: Install DepthPro
@@ -63,9 +63,11 @@ jobs:
         pip install git+https://github.com/apple/ml-depth-pro.git
         pip install pillow_heif
 
-    - name: Install UniDepth
+    - name: Install UniDepth (pinned versions)
       run: |
-        pip install git+https://github.com/lpiccinelli-eth/UniDepth.git
+        pip install "timm==1.0.11" "transformers==4.44.2" "huggingface_hub==0.25.2"
+        pip install git+https://github.com/lpiccinelli-eth/UniDepth.git --no-deps
+        pip install einops h5py imageio matplotlib pandas scipy tabulate termcolor tqdm trimesh
 
     - name: Download DepthPro checkpoint
       env:
@@ -104,6 +106,7 @@ jobs:
         commit_message: "chore: run DepthPro + UniDepth V2 comparison"
         branch: main
         file_pattern: "out_fusion/"
+        push_options: '--force-with-lease'
 
     - name: Upload artifacts
       if: always()
