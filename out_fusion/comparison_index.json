@@ -5,7 +5,7 @@
       {
         "model": "DepthPro",
         "status": "error",
-        "reason": "[Errno 2] No such file or directory: './checkpoints/depth_pro.pt'"
+        "reason": "create_model_and_transforms() got an unexpected keyword argument 'checkpoint_uri'"
       },
       {
         "model": "UniDepth V2",
