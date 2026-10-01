@@ -5,15 +5,18 @@
       {
         "model": "DepthPro",
         "status": "ok",
-        "depth_min": 5.033514022827148,
-        "depth_max": 13.646733283996582,
+        "depth_min": 5.033504962921143,
+        "depth_max": 13.646717071533203,
         "valid_points": 374816,
         "glb": "out_fusion/IMG_20260930_013705/IMG_20260930_013705_depthpro.glb"
       },
       {
         "model": "UniDepth V2",
-        "status": "error",
-        "reason": "No module named 'wandb'"
+        "status": "ok",
+        "depth_min": 2.1252105236053467,
+        "depth_max": 5.9662370681762695,
+        "valid_points": 374816,
+        "glb": "out_fusion/IMG_20260930_013705/IMG_20260930_013705_unidepth.glb"
       }
     ],
     "best_by_dense_points": "DepthPro"
