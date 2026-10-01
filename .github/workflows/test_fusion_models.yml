@@ -67,7 +67,7 @@ jobs:
       run: |
         pip install "timm==1.0.11" "transformers==4.44.2" "huggingface_hub==0.25.2"
         pip install git+https://github.com/lpiccinelli-eth/UniDepth.git --no-deps
-        pip install einops h5py imageio matplotlib pandas scipy tabulate termcolor tqdm trimesh
+        pip install einops h5py imageio matplotlib pandas scipy tabulate termcolor tqdm trimesh wandb
 
     - name: Download DepthPro checkpoint
       env:
