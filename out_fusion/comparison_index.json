@@ -1,22 +1,22 @@
 {
-  "IMG_20260930_013705": {
-    "source_image": "IMG_20260930_013705.png",
+  "test-2": {
+    "source_image": "test-2.png",
     "results": [
       {
         "model": "DepthPro",
         "status": "ok",
-        "depth_min": 5.033504962921143,
-        "depth_max": 13.646717071533203,
-        "valid_points": 374816,
-        "glb": "out_fusion/IMG_20260930_013705/IMG_20260930_013705_depthpro.glb"
+        "depth_min": 1.5978871583938599,
+        "depth_max": 5.511666774749756,
+        "valid_points": 237600,
+        "glb": "out_fusion/test-2/test-2_depthpro.glb"
       },
       {
         "model": "UniDepth V2",
         "status": "ok",
-        "depth_min": 2.1252105236053467,
-        "depth_max": 5.9662370681762695,
-        "valid_points": 374816,
-        "glb": "out_fusion/IMG_20260930_013705/IMG_20260930_013705_unidepth.glb"
+        "depth_min": 1.02702796459198,
+        "depth_max": 1.2557200193405151,
+        "valid_points": 237600,
+        "glb": "out_fusion/test-2/test-2_unidepth.glb"
       }
     ],
     "best_by_dense_points": "DepthPro"
