@@ -1,4 +1,4 @@
-name: 3D Texture Baking Pipeline
+name: 3D Texture Baking Pipeline (Barycentric)
 
 on:
   # Allows you to run this workflow manually from the Actions tab
@@ -37,7 +37,7 @@ jobs:
         mkdir -p out_fusion
 
     # 5. Run the Python baking script
-    # NOTE: Ensure your image and mesh files are committed to the 'inputs' folder before running!
+    # IMPORTANT: Ensure your image and mesh files are committed to the 'inputs' folder before running!
     - name: Run Texture Baking Script
       run: |
         python bake_test.py
