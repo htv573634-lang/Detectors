@@ -1,0 +1,52 @@
+name: 3D Texture Baking Pipeline
+
+on:
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+  # Also runs on push to the main branch
+  push:
+    branches: [ "main", "master" ]
+
+jobs:
+  build-and-bake:
+    # Using the standard GitHub-hosted CPU runner (16GB RAM)
+    runs-on: ubuntu-latest
+
+    steps:
+    # 1. Checkout your repository code
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    # 2. Set up Python
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+        cache: 'pip' # Caches dependencies to speed up future runs
+
+    # 3. Install required CPU-friendly dependencies
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install numpy Pillow trimesh xatlas
+
+    # 4. Create necessary directories (if they don't exist)
+    - name: Prepare Directories
+      run: |
+        mkdir -p inputs
+        mkdir -p out_fusion
+
+    # 5. Run the Python baking script
+    # NOTE: Ensure your image and mesh files are committed to the 'inputs' folder before running!
+    - name: Run Texture Baking Script
+      run: |
+        python bake_test.py
+
+    # 6. Upload the output GLB/OBJ files as a downloadable artifact
+    - name: Upload Baked Model Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: textured-3d-model
+        path: out_fusion/
+        if-no-files-found: error # Fails the action if the script didn't produce output
+        retention-days: 7
