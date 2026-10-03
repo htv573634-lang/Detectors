@@ -1,0 +1,4 @@
+resolution_level=9
+grid=396x600
+points=237600
+image=396x600
