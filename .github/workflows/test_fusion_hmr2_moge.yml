@@ -1,0 +1,224 @@
+name: Fuse HMR2.0 + MoGe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'fuse_hmr2_moge.py'
+      - 'inputs/**'
+
+permissions:
+  contents: write
+
+jobs:
+  fuse:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Clean previous outputs
+      run: |
+        rm -rf out_hmr2/ out_moge/
+        mkdir -p out_hmr2/ out_moge/
+        echo "[OK] Output folders cleared"
+
+    # ── CACHES ──
+    - name: Cache pip
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: pip-fusion-hm-${{ runner.os }}-v3
+        restore-keys: pip-fusion-hm-${{ runner.os }}-
+
+    - name: Cache HuggingFace
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/huggingface
+        key: hf-fusion-${{ runner.os }}-v1
+
+    - name: Cache 4D-Humans
+      id: cache-4dhumans
+      uses: actions/cache@v4
+      with:
+        path: 4D-Humans
+        key: 4dhumans-fusion-${{ runner.os }}-v1
+
+    - name: Cache detectron2 source
+      id: cache-det2src
+      uses: actions/cache@v4
+      with:
+        path: detectron2-src
+        key: detectron2-src-fusion-${{ runner.os }}-v1
+
+    - name: Cache MoGe repo
+      id: cache-moge
+      uses: actions/cache@v4
+      with:
+        path: MoGe
+        key: moge-repo-fusion-${{ runner.os }}-v1
+
+    - name: Cache MoGe checkpoint
+      id: cache-moge-ckpt
+      uses: actions/cache@v4
+      with:
+        path: MoGe/checkpoints/moge-2-vitl-normal
+        key: moge-ckpt-fusion-${{ runner.os }}-v1
+
+    # ── SYSTEM SETUP ──
+    - name: Install system deps
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          build-essential cmake git wget \
+          libgl1 libglib2.0-0 libgomp1 \
+          libsm6 libxext6 libxrender1 \
+          libegl1 libegl-mesa0 libglx-mesa0 libgles2
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+
+    - name: Install PyTorch CPU
+      run: |
+        pip install --upgrade pip
+        pip install "setuptools<81" wheel cython
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+    # ── HMR2.0 SETUP ──
+    - name: Install Detectron2 (CPU)
+      run: |
+        pip install --no-build-isolation \
+          'git+https://github.com/facebookresearch/detectron2.git'
+
+    - name: Clone detectron2 source
+      if: steps.cache-det2src.outputs.cache-hit != 'true'
+      run: git clone --depth 1 https://github.com/facebookresearch/detectron2.git detectron2-src
+
+    - name: Clone 4D-Humans
+      if: steps.cache-4dhumans.outputs.cache-hit != 'true'
+      run: git clone https://github.com/shubham-goel/4D-Humans.git
+
+    - name: Install 4D-Humans
+      run: |
+        cd 4D-Humans
+        pip install --no-build-isolation -e .[all]
+        cd ..
+
+    - name: Install extra deps
+      run: |
+        pip install opencv-python-headless pillow numpy trimesh
+        pip install smplx xatlas
+
+    - name: Download SMPL files
+      run: |
+        mkdir -p data/smpl
+        BASE="https://github.com/htv573634-lang/Detectors/releases/download/Data"
+        wget -q -O data/smpl/SMPL_FEMALE.pkl "$BASE/SMPL_FEMALE.pkl"
+        wget -q -O data/smpl/SMPL_MALE.pkl "$BASE/SMPL_MALE.pkl"
+        wget -q -O data/smpl_mean_params.npz "$BASE/smpl_mean_params.npz"
+        wget -q -O data/SMPL_to_J19.pkl "$BASE/SMPL_to_J19.pkl"
+
+    - name: Download HMR2.0 checkpoint
+      if: steps.cache-4dhumans.outputs.cache-hit != 'true'
+      run: |
+        mkdir -p 4D-Humans/logs/train/multiruns/hmr2/0/checkpoints/
+        cd 4D-Humans/logs/train/multiruns/hmr2/0
+        wget -q -O model_config.yaml \
+          "https://huggingface.co/spaces/brjathu/HMR2.0/resolve/main/logs/train/multiruns/hmr2/0/model_config.yaml"
+        wget -q --show-progress -O checkpoints/epoch=35-step=1000000.ckpt \
+          "https://huggingface.co/spaces/brjathu/HMR2.0/resolve/main/logs/train/multiruns/hmr2/0/checkpoints/epoch%3D35-step%3D1000000.ckpt"
+
+    # ── MOGE SETUP ──
+    - name: Clone MoGe
+      if: steps.cache-moge.outputs.cache-hit != 'true'
+      run: git clone https://github.com/microsoft/MoGe.git
+
+    - name: Install MoGe
+      run: |
+        cd MoGe
+        pip install -e .
+
+    - name: Download MoGe checkpoint
+      if: steps.cache-moge-ckpt.outputs.cache-hit != 'true'
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: |
+        python -c "
+        from huggingface_hub import snapshot_download
+        snapshot_download(repo_id='Ruicheng/moge-2-vitl-normal',
+                          local_dir='MoGe/checkpoints/moge-2-vitl-normal',
+                          token='${{ secrets.HF_TOKEN }}')
+        "
+
+    # ── MODIFY INPUT DIRS ──
+    - name: Point scripts at inputs/
+      run: |
+        sed -i 's|INPUT_DIR = "inputs2"|INPUT_DIR = "inputs"|' test_hmr2.py
+        sed -i 's|INPUT_DIR = "inputs2"|INPUT_DIR = "inputs"|' test_moge.py
+        echo "[OK] INPUT_DIR set to inputs/"
+
+    # ── RUN HMR2.0 ──
+    - name: Run HMR2.0
+      env:
+        SMPL_GENDER: female
+        PYTHONUNBUFFERED: "1"
+        OMP_NUM_THREADS: "2"
+      continue-on-error: true
+      run: python -u test_hmr2.py 2>&1 | tee /tmp/hmr2.log
+
+    - name: Show HMR2.0 log
+      if: always()
+      run: tail -60 /tmp/hmr2.log || true
+
+    # ── RUN MOGE ──
+    - name: Run MoGe
+      continue-on-error: true
+      run: python -u test_moge.py 2>&1 | tee /tmp/moge.log
+
+    - name: Show MoGe log
+      if: always()
+      run: tail -60 /tmp/moge.log || true
+
+    # ── RUN FUSION ──
+    - name: Run Fusion
+      run: python fuse_hmr2_moge.py 2>&1 | tee /tmp/fusion.log
+
+    - name: Show fusion log
+      if: always()
+      run: tail -80 /tmp/fusion.log || true
+
+    - name: List outputs
+      if: always()
+      run: |
+        echo "=== out_hmr2/ ==="
+        ls -lh out_hmr2/ || echo "empty"
+        echo ""
+        echo "=== out_moge/ ==="
+        ls -lh out_moge/ || echo "empty"
+
+    - name: Commit outputs
+      uses: stefanzweifel/git-auto-commit-action@v5
+      with:
+        commit_message: "chore: fuse HMR2.0 + MoGe"
+        branch: main
+        file_pattern: "out_hmr2/ out_moge/"
+        push_options: '--force-with-lease'
+
+    - name: Upload artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: fusion-hmr2-moge-${{ github.run_number }}
+        path: |
+          out_hmr2/
+          out_moge/
+          /tmp/hmr2.log
+          /tmp/moge.log
+          /tmp/fusion.log
+        if-no-files-found: warn2
