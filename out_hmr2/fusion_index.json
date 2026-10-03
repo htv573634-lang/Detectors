@@ -1,0 +1,12 @@
+{
+  "test-2": {
+    "name": "test-2",
+    "hmr2_source": "hmr2_female_mesh_test-2.obj",
+    "moge_source": "test-2_points.ply",
+    "vertices": 6588,
+    "faces": 13776,
+    "displaced_vertices": 2536,
+    "preserved_back_vertices": 3909,
+    "glb": "out_hmr2/test-2_hmr2_moge_fused.glb"
+  }
+}
