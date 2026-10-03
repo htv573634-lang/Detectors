@@ -113,7 +113,7 @@ jobs:
     - name: Install extra deps
       run: |
         pip install opencv-python-headless pillow numpy trimesh
-        pip install smplx xatlas
+        pip install smplx xatlas open3d scipy
 
     - name: Download SMPL files
       run: |
@@ -156,7 +156,7 @@ jobs:
                           token='${{ secrets.HF_TOKEN }}')
         "
 
-    # ── MODIFY INPUT DIRS ──
+    # ── POINT SCRIPTS AT inputs/ ──
     - name: Point scripts at inputs/
       run: |
         sed -i 's|INPUT_DIR = "inputs2"|INPUT_DIR = "inputs"|' test_hmr2.py
@@ -221,4 +221,4 @@ jobs:
           /tmp/hmr2.log
           /tmp/moge.log
           /tmp/fusion.log
-        if-no-files-found: warn2
+        if-no-files-found: warn
